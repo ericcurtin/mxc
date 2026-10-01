@@ -222,6 +222,25 @@ impl Default for WindowsSandboxConfig {
     }
 }
 
+/// Entra credentials for an enterprise agent user. `Debug` omits the token.
+#[derive(Clone, PartialEq, Eq)]
+pub struct IsolationSessionUser {
+    /// User principal name of the Entra account.
+    pub upn: String,
+    /// Web Account Manager token for the account.
+    pub wam_token: String,
+}
+
+impl std::fmt::Debug for IsolationSessionUser {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IsolationSessionUser")
+            .field("upn", &self.upn)
+            .field("wam_token", &"<redacted>")
+            .finish()
+    }
+}
+
 /// State-aware provision-phase config for the Isolation Session backend.
 /// Nested under `isolationSession.provision`. The one-shot
 /// surface takes no backend configuration.
@@ -242,6 +261,15 @@ pub struct IsolationSessionProvisionConfig {
     /// **distinct** value from an absent one and round-trips as such. The exact
     /// JSON contract rejects `null`.
     pub app_id: Option<String>,
+    pub user: Option<IsolationSessionUser>,
+}
+
+/// State-aware start-phase config for the Isolation Session backend.
+/// Nested under `isolationSession.start`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IsolationSessionStartConfig {
+    /// Optional Entra credentials for a sandbox provisioned with `user`.
+    pub user: Option<IsolationSessionUser>,
 }
 
 /// Runtime-owned state-aware provision config for the WSLc backend.
@@ -1291,6 +1319,17 @@ impl ScriptResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isolation_session_user_debug_omits_the_token() {
+        let user = IsolationSessionUser {
+            upn: "alice@contoso.com".to_string(),
+            wam_token: "secret-token".to_string(),
+        };
+        let rendered = format!("{user:?}");
+        assert!(rendered.contains("alice@contoso.com"), "{rendered}");
+        assert!(!rendered.contains("secret-token"), "{rendered}");
+    }
 
     #[test]
     fn only_rejection_earns_a_caller_actionable_error_code() {

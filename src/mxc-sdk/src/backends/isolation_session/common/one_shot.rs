@@ -97,7 +97,7 @@ impl ScriptRunner for IsolationSessionRunner {
         // `appId`. Passing `None` selects the default registration, which the
         // in-proc client resolves to the calling process's PFN when packaged
         // (or leaves empty when unpackaged).
-        let manager = match IsolationSessionManager::add_user(None) {
+        let manager = match IsolationSessionManager::add_user(None, None) {
             Ok((_provisioned, manager)) => {
                 let _ = writeln!(logger, "Isolation Session: agent user provisioned");
                 manager
@@ -105,7 +105,7 @@ impl ScriptRunner for IsolationSessionRunner {
             Err(e) => return e.into(),
         };
 
-        if let Err(e) = manager.start_session() {
+        if let Err(e) = manager.start_session(None) {
             // Provision succeeded; start did not. Clean up. stop_session
             // is a no-op on an unstarted session.
             let stopped = manager.stop_session().is_ok();

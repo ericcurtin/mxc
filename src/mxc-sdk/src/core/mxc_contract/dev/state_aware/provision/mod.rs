@@ -26,7 +26,7 @@ pub use containment::{probe_containment, Containment, ContainmentProbeError};
 pub use isolation_session::{
     IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
-    IsolationSessionProvisionRequest, StateAwareIsolationSession,
+    IsolationSessionProvisionRequest, IsolationSessionUser, StateAwareIsolationSession,
 };
 pub use windows_sandbox::{WindowsSandboxContainment, WindowsSandboxProvisionRequest};
 pub use wslc::{StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionRequest};
