@@ -1,195 +1,132 @@
-# Nanvix MicroVM Backend
+# NVX MicroVM Backend
 
 > **Audience:** MXC consumers and developers
 
-Nanvix MicroVM is an experimental containment backend for MxC. It is powered by the
-[Nanvix OS/VM](https://aka.ms/nanvix) and runs untrusted code with hardware-enforced isolation
-via the Windows Hypervisor Platform (WHP) on Windows or KVM on Linux.
+`microvm` is an experimental **Windows x64** backend using the signed native
+agent bundled by the official `aci_edge_sandboxes` crate. The previous Nanvix
+backend is inactive, including on Linux. This document retains its old location
+so existing links continue to work.
 
-## Key Features
+## Phase1: minimal signed create-and-run
 
-- **Fast cold-start** — ~100 ms from process spawn to guest code execution (Windows warm-start via WHP snapshot; Linux uses cold boot via KVM every run)
-- **Low Memory Footprint** — Resident memory size of ~100 MB
-- **Hardware-Enforced Isolation** — Runs guest code inside a lightweight virtual machine (VM)
+Build with `build.bat --with-microvm`, or, from `src`:
 
-## Requirements
-
-### Windows
-
-- Windows with WHP enabled (`bcdedit /set hypervisorlaunchtype auto`)
-- Nanvix runtime binaries (`nanvixd.exe`, `kernel.elf`, `python3.initrd`, `nanvix_rootfs.img`) placed next to `wxc-exec.exe`
-- Build with `--with-microvm` (`build.bat --with-microvm` or `cargo build -p wxc --features microvm`)
-- `--experimental` flag (Nanvix MicroVM is an experimental feature)
-
-### Linux
-
-- Linux with KVM available at `/dev/kvm` (and the invoking user has read/write access to it)
-- Nanvix runtime binaries (`nanvixd.elf`, `kernel.elf`, `python3.initrd`, `nanvix_rootfs.img`) placed next to `lxc-exec` (the build script downloads and stages them automatically)
-- Build with `--with-microvm` (`./build.sh --with-microvm` or `cargo build -p lxc --features microvm`)
-- `--experimental` flag (Nanvix MicroVM is an experimental feature)
-
-> **Note:** On Linux, WHP snapshots are not used. Each invocation cold-boots
-> the VM via KVM. Snapshot-based warm-start is Windows-only.
-
-### Offline builds
-
-By default the `nanvix_binaries` build script downloads the NanVix release
-assets at compile time. For air-gapped or hermetic builds, pre-fetch the
-binaries and point the `NANVIX_BIN` environment variable at the directory
-containing them:
-
-```
-# Windows (PowerShell)
-$env:NANVIX_BIN = "C:\path\to\nanvix-binaries"
-
-# Linux / macOS
-export NANVIX_BIN=/path/to/nanvix-binaries
+```text
+cargo build -p wxc --features microvm --jobs 2
 ```
 
-When `NANVIX_BIN` is set, the build performs no network downloads and uses the
-provided directory directly. The directory must contain the required binaries
-(the flat files plus the `bin/` subdirectory); their checksums are still
-verified against `checksums.json`. The easiest way to produce such a directory
-is to run a normal `--with-microvm` build once and copy the staged
-`nanvix-binaries` directory out of `OUT_DIR`.
+The host needs Windows Hypervisor Platform and hardware virtualization.
+Requests require `--experimental`. Unsupported targets fail closed; enabling
+the Cargo feature does not enable MicroVM execution on Linux, macOS or ARM64.
 
-> **Snapshots are not trusted in offline mode.** WHP warm-start snapshots
-> (`snapshots/kernel.vmem`, `snapshots/kernel.whp.cbor`) are *not* covered by
-> `checksums.json` — in a normal build they are generated locally, not
-> downloaded. Any `snapshots/` directory inside `NANVIX_BIN` is therefore
-> ignored (never copied next to the executable), and the runtime cold-boots on
-> first use to regenerate a verified snapshot. This prevents an unverified VM
-> memory image from being warm-booted against otherwise-verified binaries.
+MXC uses `AgentConfig::bundled` and `AciEdgeSandbox::agent`, not the standalone
+OpenVMM backend. Cargo fetches immutable source revision
+`0430ce79d125203c20f0aa69243480513a774296` from
+[`microsoft/nvx`](https://github.com/microsoft/nvx), with only `agent-bundled`
+enabled and default features disabled. `mxc-sdk` is not publishable while this
+development Git dependency is in use.
 
-## Quick Start
+The dependency's `build.rs` calls `build/agent_bundle.rs` to download
+`aci-edge-sandboxes.zip` from release `v0.1.0-dev.0430ce79d125`. It verifies
+the archive, layout, component checksums and sandbox ABI, stages the bundle,
+and compiles in its manifest and DLL pins. MXC's build module requires the
+exact path set and SHA-256 of every file in that official staged bundle,
+including all guest, kernel, image-tool, manifest, checksum, provenance, and
+licence files. This second check is necessary because Cargo does not inherit a
+Git or path dependency's `.cargo/config.toml` when MXC is built by a downstream
+consumer. The dependency exposes only the extracted directory to MXC, so the
+original ZIP byte stream is no longer available there; the complete extracted
+tree identity is pinned instead. MXC does not invoke Cargo recursively,
+implement a second downloader, or silently fall back to an unsigned or
+standalone backend.
+
+| Release artifact | SHA-256 |
+| --- | --- |
+| `aci-edge-sandboxes.zip` | `98e3d6011b0664fad6fa783768370a34209639463f5ab812b7776840660ac24e` |
+| `bin/aci_edge_agent.dll` | `a203e58b97a642bd4a68824c0387965541895b25582e18db6f55e28947f5f135` |
+| `bin/openvmm.exe` | `697f8221e62a1ea4efb3846fefde6f595c89f4f81c0153a2609bf6fb4c81ea9e` |
+
+Distribute the entire `aci-edge-sandboxes/` directory beside `wxc-exec.exe`
+or the consuming executable. Cargo test/example executables can discover it in
+their parent profile directory. The repository Windows build also copies this
+directory with the Node native runtime. Runtime path overrides are not needed
+for normal operation; missing or altered assets fail rather than falling back.
+Build-time bundle overrides must still match the approved signed component pins.
+
+The control initramfs is not a workload userland. P1 selects the official
+example's public workload image,
+`mcr.microsoft.com/azurelinux/base/core:3.0`. The native agent pulls/converts it
+on the host using bundled `direct-images.exe`; this requires host registry
+connectivity and does **not** grant guest network access. There is no P1 public
+image-selection or credential API. A private state directory is created for
+each run, and stop, deprovision and state-directory removal follow execution.
+
+### Request example
+
+Commands are POSIX shell commands inside the Linux workload, not Python source
+or Windows command lines:
 
 ```json
 {
   "version": "1.1.0-alpha",
+  "containment": "microvm",
   "process": {
-    "commandLine": "print('Hello from MicroVM!')",
+    "commandLine": "printf 'hello from NVX\\n'; printf 'stderr\\n' >&2; exit 42",
     "timeout": 30000
-  },
-  "containment": "microvm"
+  }
 }
 ```
 
-```bash
+```text
 wxc-exec.exe --experimental config.json
 ```
 
-## SDK Usage
+The minimum in-process captured surface is MXC's existing JSON facade,
+`mxc_sdk::__ffi::run_json(json, true)`. It returns separate stdout/stderr bytes
+and an exit or timeout outcome. This is not a new public Rust lifecycle API.
 
-Use `spawnSandboxFromConfig` with `usePty: false` for reliable exit codes and
-separate stdout/stderr streams:
+### Supported and rejected requests
 
-```typescript
-const child = spawnSandboxFromConfig(config, {
-  experimental: true,
-  usePty: false,
-});
+P1 accepts command, timeout (at most one hour), guest working directory without
+`..` components, and additive environment entries (at most 32 KiB).
+Supplying `process.env` requires `inheritDefaultEnv: true`. Proxy environment
+variables are rejected, case-insensitively.
 
-```
+P1 rejects filesystem path grants/denials, explicit network or proxy policy,
+explicit UI policy, capture-denials, `destroyOnExit: false`,
+`preservePolicy: true`, streaming, PTY and container lifecycle operations.
+Policy rejection occurs before bundle discovery or sandbox creation. The
+native agent remains responsible for validating and enforcing its own
+command/environment/runtime constraints.
 
-## Filesystem Policy
+## Release attestations versus consumer evidence
 
-### readwrite_paths
+The published bundle records `officialSigned=true`, `complete=true`,
+`mxcCompatible=false`, and `runtimeValidated=false`. These are producer
+attestations, not an MXC test result. MXC does not rewrite them, treat the
+negative validation flags alone as proof of runtime failure, or claim that a
+successful build proves consumer runtime compatibility.
 
-Host directories or files listed in `readwritePaths` are copied into a private
-per-run staging directory before boot. Nanvix mounts are snapshot-based — host
-files are **not** modified while the guest is running. No junctions or live host
-mounts are used.
+The bundle embeds NVX revision
+`19a359bb3b8974f14bd04b9f2a327a2a3f25d868`, which differs from the crate's
+`0430ce79…` source revision. The official build warns about this difference.
+Keep the warning and both revisions in validation evidence.
 
-```json
-{
-  "version": "1.1.0-alpha",
-  "process": {
-    "commandLine": "import os\npath = 'C:\\\\Users\\\\me\\\\work'\nwith open(os.path.join(path, 'result.txt'), 'w') as f:\n    f.write('done')",
-    "timeout": 30000
-  },
-  "containment": "microvm",
-  "filesystem": {
-    "readwritePaths": ["C:\\Users\\me\\work"]
-  }
-}
-```
+Host validation can check archive/component SHA-256, Windows Authenticode for
+the DLL, OpenVMM and image tool, and checksum integrity of the Linux kernel and
+guest agent/initramfs. Linux guest files do not carry Authenticode signatures.
+Actual guest execution, timeout and cleanup still require a WHP-capable test
+host. Ignored tests in `src/mxc-sdk/tests/nvx_e2e.rs` prepare real MXC
+facade/executor cases; compiling them or running host-only rejection cases is
+not VM smoke evidence.
 
-Inside the guest, host paths in the script are transparently rewritten to their
-guest mount equivalents at staging time. The script uses the original host paths
-and the staging layer translates them before the code reaches the VM.
+## Stacked implementation boundary
 
-| Host path          | Guest path                  |
-| ------------------ | --------------------------- |
-| `C:\Users\me\work` | `/mnt/rw/c/Users/me/work`   |
-| `C:\data\ref-data` | `/mnt/rw/c/data/ref-data`   |
+- **P1:** signed bundled crate, minimum distributable staging, fail-closed
+  routing/policy, and captured create-and-run.
+- **P2:** deployment/packaging and runtime-policy hardening, including richer
+  policy and deployment validation.
+- **P3:** public Rust container lifecycle operations and streaming.
+- **P4:** CLI work follows P3.
 
-**Copyback semantics:** After `nanvixd` exits normally, MXC copies the modified
-snapshot back to the original host paths. Copyback runs for both exit code `0`
-and non-zero guest exit codes. It is skipped for preflight failure, spawn
-failure, watchdog timeout, and runner/runtime errors — no partial state is
-leaked to the host.
-
-### readonly_paths
-
-Host directories listed in `readonlyPaths` are copied into the staging directory
-with read-only file attributes. Writes return `EACCES`. Read-only paths are
-never copied back to the host.
-
-```json
-{
-  "filesystem": {
-    "readonlyPaths": ["C:\\data\\reference"]
-  }
-}
-```
-
-### denied_paths
-
-Not supported for MicroVM. If `deniedPaths` is specified, the config is rejected with an error.
-
-## Constraints
-
-| Constraint                              | Value                                       |
-| --------------------------------------- | ------------------------------------------- |
-| Single file size                        | < 4 GB (FAT32 limit)                        |
-| Guest RAM                               | 256 MB                                      |
-| Symlinks/reparse points in source paths | Not supported (rejected at preflight)       |
-| Junctions for staging                   | Not used                                    |
-| `workingDirectory`                      | Not supported (guest CWD is `/`)            |
-| Network policy                          | v1.1 isolated or explicitly unrestricted host networking |
-
-## Networking
-
-Host networking is **opt-in**. Exact v1.1 supports two coherent directional
-postures: all three of egress default, ingress default and host-loopback deny
-leaves networking disabled; all three explicitly allow enables unrestricted
-host networking through `-allow-host-networking`. Mixed postures are rejected,
-including egress allow with omitted ingress defaults.
-
-```json
-{
-  "version": "1.1.0-alpha",
-  "containment": "microvm",
-  "process": { "commandLine": "print('network enabled')" },
-  "network": {
-    "egress": { "default": "allow" },
-    "ingress": { "default": "allow", "hostLoopback": "allow" }
-  }
-}
-```
-
-Disabled networking prevents guest socket creation (`OSError: [Errno 134]`).
-Unrestricted networking includes host-backed bind/listen capabilities;
-NanVix cannot independently enforce ingress or host-loopback restrictions.
-Directional egress rules are explicitly rejected rather than translated to
-the guest's IPv4 host filter, which cannot implement their full semantics,
-including default-deny DNS.
-Runtime proxy configuration is also unsupported.
-
-## Not Supported
-
-| Workload                                     | Error                            |
-| -------------------------------------------- | -------------------------------- |
-| Mixed directional networking or egress rules | Rejected before VM creation      |
-| Runtime proxy                                | Rejected before VM creation      |
-| File writing outside `/mnt/rw/`              | `OSError: Read-only file system` |
+No P2 implementation is implied by P1's necessary bundle staging.
