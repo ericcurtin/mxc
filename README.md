@@ -60,11 +60,9 @@ Linux, and macOS.
 
 The Windows x64 `microvm` backend is a development NVX integration. A build
 with `--with-microvm` stages the pinned signed NVX agent bundle and requires the
-runtime `--experimental` opt-in. This initial slice supports create-and-run
+runtime `--experimental` opt-in. It supports create-and-run
 execution with the command, timeout, guest working directory, and additive
-environment settings. Filesystem, network, proxy, UI, capture-denials,
-non-default lifecycle, streaming, PTY, and container lifecycle operations
-remain fail-closed. Linux MicroVM execution is inactive. See the
+environment settings. See the
 [NVX integration notes](src/mxc-sdk/README.md#experimental-nvx-create-and-run)
 for build requirements and supported execution.
 
