@@ -112,14 +112,6 @@ a capability declaration, not a schedule.
 
 Current platforms:
 
-The `microvm` entries below describe the existing CI deployment catalog.
-Active MXC MicroVM execution is now the experimental signed NVX P1 backend
-on Windows x64 only; the old Nanvix Linux runtime is inactive. The legacy
-payload checks in the unified host-preparation scripts do not validate this
-new bundle. Updating unified deployment/packaging and its policy-validation
-matrix belongs to P2. The dedicated `microvm-e2e.yml` workflow and
-`mxc-sdk/tests/nvx_e2e.rs` contain the signed-bundle consumer cases.
-
 | Platform id | Family | x64 pool | arm64 pool | Declared backends (x64) | Declared backends (arm64) |
 |-------------|--------|----------|------------|--------------------------|------------|
 | `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | `1es-mxc-windows-prerelease-t1-arm64` | process-t1, isolation-session, wslc, windows-sandbox, microvm | process-t1, isolation-session |
@@ -241,7 +233,7 @@ get fixed or wired.
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
 | IsolationSession | ✅ Good | Runs the one-shot and state-aware suites, the Rust SDK in-process and helper tests, the C# end-to-end tests, the Node SDK suite and the COM apartment probe. Fails when the host cannot run isolation sessions, when a suite executes nothing, or when the run changes the set of local accounts. |
 | Windows Sandbox | ⛔ Blocked | Images don't support `Containers-DisposableClientVM` opt. feature |
-| MicroVM | Experimental P1 | Signed NVX on Windows x64; minimal captured create-and-run. Real WHP consumer evidence is separate from host-only build/signature checks. Unified artifact/matrix rollout belongs to P2. |
+| MicroVM | Experimental | Signed NVX on Windows x64, covered by `microvm-e2e.yml`. The unified matrix still checks legacy Nanvix payloads. |
 | Seatbelt | ✅ Good | Failures are genuine MXC bugs. |
 
 ## Host preparation

@@ -8,15 +8,15 @@ const MAX_TIMEOUT_MS: u32 = 3_600_000;
 const MAX_ENVIRONMENT_BYTES: usize = 32 * 1024;
 const PROXY_ENVIRONMENT_KEYS: [&str; 4] = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
 
-pub(super) fn validate_phase_one(request: &ExecutionRequest) -> Result<(), MxcError> {
+pub(super) fn validate_request(request: &ExecutionRequest) -> Result<(), MxcError> {
     if !request.lifecycle.destroy_on_exit {
         return Err(MxcError::policy_validation(
-            "Phase 1 NVX requires lifecycle.destroyOnExit=true",
+            "NVX requires lifecycle.destroyOnExit=true",
         ));
     }
     if request.lifecycle.preserve_policy {
         return Err(MxcError::policy_validation(
-            "Phase 1 NVX requires lifecycle.preservePolicy=false",
+            "NVX requires lifecycle.preservePolicy=false",
         ));
     }
     if !request.policy.readonly_paths.is_empty()
@@ -25,7 +25,7 @@ pub(super) fn validate_phase_one(request: &ExecutionRequest) -> Result<(), MxcEr
         || !request.policy.denied_paths.is_empty()
     {
         return Err(MxcError::policy_validation(
-            "Phase 1 NVX does not support filesystem policy",
+            "NVX does not support filesystem policy",
         ));
     }
     if request.policy.network_specified
@@ -33,42 +33,42 @@ pub(super) fn validate_phase_one(request: &ExecutionRequest) -> Result<(), MxcEr
         || request.policy.network_proxy.is_enabled()
     {
         return Err(MxcError::policy_validation(
-            "Phase 1 NVX does not support network policy or proxy configuration",
+            "NVX does not support network policy or proxy configuration",
         ));
     }
     if request.policy.ui_specified {
         return Err(MxcError::policy_validation(
-            "Phase 1 NVX does not support UI policy",
+            "NVX does not support UI policy",
         ));
     }
     if request.policy.capture_denials.is_some() {
         return Err(MxcError::policy_validation(
-            "Phase 1 NVX does not support processContainer.captureDenials",
+            "NVX does not support processContainer.captureDenials",
         ));
     }
     if request.policy.least_privilege_specified {
         return Err(MxcError::policy_validation(
-            "Phase 1 NVX does not support processContainer.leastPrivilege",
+            "NVX does not support processContainer.leastPrivilege",
         ));
     }
     if request.policy.learning_mode_specified {
         return Err(MxcError::policy_validation(
-            "Phase 1 NVX does not support processContainer.learningMode",
+            "NVX does not support processContainer.learningMode",
         ));
     }
     if request.policy.capabilities_specified {
         return Err(MxcError::policy_validation(
-            "Phase 1 NVX does not support processContainer.capabilities",
+            "NVX does not support processContainer.capabilities",
         ));
     }
     if request.policy.base_process_ui_specified {
         return Err(MxcError::policy_validation(
-            "Phase 1 NVX does not support processContainer.ui",
+            "NVX does not support processContainer.ui",
         ));
     }
     if request.policy.fallback_specified {
         return Err(MxcError::policy_validation(
-            "Phase 1 NVX does not support fallback policy",
+            "NVX does not support fallback policy",
         ));
     }
     validate_process(request)
@@ -82,7 +82,7 @@ fn validate_process(request: &ExecutionRequest) -> Result<(), MxcError> {
     }
     if request.script_timeout > MAX_TIMEOUT_MS {
         return Err(MxcError::policy_validation(
-            "Phase 1 NVX process.timeout must not exceed one hour",
+            "NVX process.timeout must not exceed one hour",
         ));
     }
     if request
@@ -91,18 +91,18 @@ fn validate_process(request: &ExecutionRequest) -> Result<(), MxcError> {
         .any(|component| component == "..")
     {
         return Err(MxcError::policy_validation(
-            "Phase 1 NVX process.cwd must not contain '..' path components",
+            "NVX process.cwd must not contain '..' path components",
         ));
     }
     if !request.working_directory.is_empty() && !request.working_directory.starts_with('/') {
         return Err(MxcError::policy_validation(
-            "Phase 1 NVX process.cwd must be an absolute POSIX guest path",
+            "NVX process.cwd must be an absolute POSIX guest path",
         ));
     }
     if let Some(environment) = &request.env {
         if !request.inherit_default_env {
             return Err(MxcError::policy_validation(
-                "Phase 1 NVX process.env requires inheritDefaultEnv=true",
+                "NVX process.env requires inheritDefaultEnv=true",
             ));
         }
         let bytes = environment
@@ -111,7 +111,7 @@ fn validate_process(request: &ExecutionRequest) -> Result<(), MxcError> {
             .sum::<usize>();
         if bytes > MAX_ENVIRONMENT_BYTES {
             return Err(MxcError::policy_validation(
-                "Phase 1 NVX process.env must not exceed 32 KiB",
+                "NVX process.env must not exceed 32 KiB",
             ));
         }
         for entry in environment {
@@ -126,7 +126,7 @@ fn validate_process(request: &ExecutionRequest) -> Result<(), MxcError> {
                 .any(|candidate| key.eq_ignore_ascii_case(candidate))
             {
                 return Err(MxcError::policy_validation(
-                    "Phase 1 NVX rejects proxy environment variables; use typed network proxy policy in a later phase",
+                    "NVX does not support proxy environment variables",
                 ));
             }
         }
@@ -148,7 +148,7 @@ mod tests {
     }
 
     fn assert_policy_error(request: &ExecutionRequest, text: &str) {
-        let error = validate_phase_one(request).unwrap_err();
+        let error = validate_request(request).unwrap_err();
         assert_eq!(error.code, MxcErrorCode::PolicyValidation);
         assert!(error.message.contains(text), "{error}");
     }
@@ -160,7 +160,7 @@ mod tests {
         request.working_directory = "/workspace".to_owned();
         request.env = Some(vec!["KEY=value".to_owned()]);
         request.inherit_default_env = true;
-        assert!(validate_phase_one(&request).is_ok());
+        assert!(validate_request(&request).is_ok());
     }
 
     #[test]
@@ -232,7 +232,7 @@ mod tests {
             "x".repeat(MAX_ENVIRONMENT_BYTES - 5)
         )]);
         request.inherit_default_env = true;
-        assert!(validate_phase_one(&request).is_ok());
+        assert!(validate_request(&request).is_ok());
 
         request.working_directory = "C:\\host".to_owned();
         assert_policy_error(&request, "absolute POSIX guest path");
@@ -243,13 +243,13 @@ mod tests {
         }
         request.env = Some(vec!["=missing-key".to_owned()]);
         assert_eq!(
-            validate_phase_one(&request).unwrap_err().code,
+            validate_request(&request).unwrap_err().code,
             MxcErrorCode::MalformedRequest
         );
         request.env = None;
         request.script_code.push('\0');
         assert_eq!(
-            validate_phase_one(&request).unwrap_err().code,
+            validate_request(&request).unwrap_err().code,
             MxcErrorCode::MalformedRequest
         );
     }

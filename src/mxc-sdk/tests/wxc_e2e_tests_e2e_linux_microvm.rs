@@ -5,9 +5,6 @@
 
 //! Linux MicroVM (NanVix/KVM) E2E integration tests.
 //!
-//! Retained as inactive historical coverage while active `microvm` dispatch is
-//! NVX on Windows x64 only.
-//!
 //! These tests mirror the Windows MicroVM E2E suite in `e2e_windows.rs` and
 //! invoke `lxc-exec` directly with the `microvm` containment backend.
 //! Tests skip gracefully when prerequisites (binaries, KVM) are missing.

@@ -39,7 +39,7 @@ Linux / macOS (`.sh`):
 | `run_filesystem_bfs_spaces_test.ps1` | BFS path-with-spaces test | `wxc-exec.exe` |
 | `run_test_configs.ps1` | All test configs via wxc-test-driver | `wxc-test-driver.exe` |
 | `run_examples.ps1` | All examples via wxc-test-driver | `wxc-test-driver.exe` |
-| `run_microvm_basic_test.ps1` | Legacy Nanvix helper (inactive; do not use for NVX validation) | Historical only |
+| `run_microvm_basic_test.ps1` | MicroVM smoke test | `wxc-exec.exe`, build with `microvm`, complete signed bundle |
 | `run_microvm_tests.ps1` | Windows signed NVX command, output, exit, and timeout E2E suite | WHP enabled, build with `microvm`, complete signed bundle |
 | `run_windows_sandbox_one_shot_tests.ps1` | Windows Sandbox one-shot E2E suite (fresh disposable VM per test) | Windows Sandbox enabled |
 | `run_windows_sandbox_state_aware_tests.ps1` | Windows Sandbox state-aware lifecycle E2E (single VM held across provision/start/exec*/stop/deprovision) | Windows Sandbox enabled |

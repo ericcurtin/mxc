@@ -333,6 +333,13 @@ mod windows_x64 {
         assert_eq!(result.outcome, WaitResult::Exited(0));
         assert_eq!(result.stdout, format!("{marker}:/tmp").as_bytes());
 
+        let result = facade_run(process_only_request(
+            "printf '\\377\\000\\376'; printf '\\200\\000\\201' >&2; exit 42",
+        ));
+        assert_eq!(result.outcome, WaitResult::Exited(42));
+        assert_eq!(result.stdout, b"\xff\0\xfe");
+        assert_eq!(result.stderr, b"\x80\0\x81");
+
         let mut timeout =
             process_only_request("printf partial-out; printf partial-err >&2; sleep 5");
         timeout["process"]["timeout"] = json!(200);
@@ -362,6 +369,15 @@ mod windows_x64 {
             assert_eq!(output.stdout, marker.as_bytes());
             assert_eq!(output.stderr, b"executor-stderr");
         }
+        let output = executor_output(
+            &process_only_request(
+                "printf '\\377\\000\\376'; printf '\\200\\000\\201' >&2; exit 42",
+            ),
+            false,
+        );
+        assert_eq!(output.status.code(), Some(42));
+        assert_eq!(output.stdout, b"\xff\0\xfe");
+        assert_eq!(output.stderr, b"\x80\0\x81");
         let mut timeout =
             process_only_request("printf partial-out; printf partial-err >&2; sleep 5");
         timeout["process"]["timeout"] = json!(200);
@@ -369,7 +385,7 @@ mod windows_x64 {
         assert_eq!(output.status.code(), Some(-1));
         assert_eq!(output.stdout, b"partial-out");
         assert!(String::from_utf8_lossy(&output.stderr).contains("partial-err"));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("timeout"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("NVX workload timed out"));
         let output = executor_output(&process_only_request("printf after-timeout"), false);
         assert_eq!(output.status.code(), Some(0));
         assert_eq!(output.stdout, b"after-timeout");

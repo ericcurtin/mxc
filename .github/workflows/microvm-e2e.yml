@@ -40,7 +40,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: cargo build -p wxc --features microvm --target x86_64-pc-windows-msvc --jobs 2
+        run: cargo build -p wxc --features microvm --target x86_64-pc-windows-msvc
 
       - name: Exclude build output from Windows Defender
         shell: pwsh
@@ -76,8 +76,10 @@ jobs:
         shell: pwsh
         working-directory: src
         run: |
-          cargo test -p mxc-sdk --features microvm --test wxc_e2e_tests_e2e_windows --target x86_64-pc-windows-msvc --jobs 2 test_microvm_ -- --nocapture
-          cargo test -p mxc-sdk --features microvm --test nvx_e2e --target x86_64-pc-windows-msvc --jobs 2 -- --include-ignored --nocapture --test-threads=1
+          cargo test -p mxc-sdk --features microvm --test wxc_e2e_tests_e2e_windows --target x86_64-pc-windows-msvc test_microvm_ -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p mxc-sdk --features microvm --test nvx_e2e --target x86_64-pc-windows-msvc -- --include-ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload logs on failure
         if: failure() || cancelled()
