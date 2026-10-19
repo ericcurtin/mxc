@@ -4,6 +4,12 @@
 
 Below is our guidance for how to report issues, propose new features, and submit contributions via Pull Requests (PRs).
 
+**Proposing a feature?** Start with
+[maintainer agreement](#get-maintainer-agreement-for-features).
+
+**Maintaining the project?** See [MAINTAINERS.md](MAINTAINERS.md) for feature
+acceptance and spec-approval responsibilities.
+
 ## Open Development Workflow
 
 The MXC team carries out development in the open. When the team finds issues we file them in this repository. When we propose new ideas or think up new features, we file new feature requests. When we work on fixes or features, we create branches and work on those improvements. And when PRs are reviewed, we review them in public.
@@ -13,6 +19,9 @@ The point of doing all this work in public is to ensure that we are holding ours
 ### Issue Triage
 
 The team triages new issues regularly. During triage, the team uses labels to categorize, manage, and drive the project workflow. Issues are categorized into one of four types — **Bug**, **Feature**, **Documentation**, or **Task** — and all new issues receive the `Needs-Triage` label until a team member has reviewed them.
+
+Maintainers record feature decisions and requests for more information in
+the GitHub issue.
 
 If you file issues or create PRs, please keep an eye on your GitHub notifications. Issues and PRs that remain unanswered for several days after a request for information may be closed.
 
@@ -91,11 +100,20 @@ If you're affected by an issue but don't have new information to add, upvote the
 
 For those willing to help fix issues or implement features:
 
-### To spec or not to spec
+### Get maintainer agreement for features
 
-Some issues are quick and simple to describe. Once a team member has agreed with your approach, skip ahead to "Fork, Clone, Branch, and Create your PR" below.
+Follow the [feature authoring guide](./docs/development/guides/authoring-a-new-feature.md):
 
-Some changes require careful thought and a written design before implementation. For these, we'll request a short design document — typically a markdown file under `docs/` or a detailed comment on the issue describing the proposed configuration schema changes, runner behavior, or SDK API surface. Driving towards agreement in writing, before any code is written, often results in simpler code and less wasted effort.
+1. Discuss the feature in an issue. Say if you want to do the work, and wait
+   for a maintainer to apply `feature-accepted`.
+2. Complete any required design/API spec review and merge before starting
+   implementation or opening an implementation PR, including a draft.
+3. Implement the agreed design with functional tests and documentation.
+   Keep the issue open until all agreed work is complete.
+
+The guide defines [when a spec is required](./docs/development/guides/authoring-a-new-feature.md#when-a-spec-is-required),
+templates and file layout, approval labels, and the schema, backend, and SDK
+implementation stages. It applies to human and agent-authored contributions.
 
 ### Documentation audiences
 
@@ -114,14 +132,10 @@ they describe.
 
 ### Experimental features
 
-New, in-development features use their permanent JSON locations in the mutable
-development contract. They may still require the binary's `--experimental`
-runtime authorization until graduation; that gate is independent of JSON
-placement. If you're adding a new feature, follow the step-by-step checklist in
-[`docs/development/guides/authoring-a-new-feature.md`](./docs/development/guides/authoring-a-new-feature.md), which
-walks through the schema, Rust, and test-config changes required. The schema
-versioning model and promotion path from experimental to stable are described
-in [`docs/development/architecture/versioning.md`](./docs/development/architecture/versioning.md).
+Follow the [feature guide](./docs/development/guides/authoring-a-new-feature.md)
+for implementation order and the
+[versioning design](./docs/development/architecture/versioning.md) for development
+contracts, publication, and experimental authorization.
 
 ### Help Wanted
 
@@ -137,7 +151,9 @@ This project requires contributors to sign the [Microsoft Contributor License Ag
 
 ### Fork, Clone, Branch, and Create your PR
 
-Once you've discussed your proposed change with a team member and agreed on an approach:
+Agree on an approach before implementation. For features, complete the
+[acceptance and spec-review steps](./docs/development/guides/authoring-a-new-feature.md)
+first.
 
 1. Fork the repository if you haven't already.
 2. Clone your fork locally.
@@ -298,6 +314,20 @@ Reviewers will look for:
 * Code style consistent with the rest of the repo.
 
 It may take several review cycles. The result should be solid, testable, conformant code that is safe to merge.
+
+### Preserve PR review history
+
+Once a PR is open, including a draft, its commit history helps reviewers track
+what changed between reviews. This applies to feature design specs, API
+proposals, and implementation PRs.
+
+- Push focused follow-up commits for review feedback.
+- Rebasing, squashing, amending published commits, and force-pushing are highly
+  discouraged unless a maintainer explicitly requests them.
+- If conflicts with `main` arise, merge `main` into the PR branch and resolve
+  them in the merge commit instead of rebasing.
+
+Clean up commit history before opening the PR, not during review.
 
 ### Merge
 

@@ -5,6 +5,15 @@ labels:
 - Issue-Feature
 - Needs-Triage
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Suggesting a feature does not mean you have to implement it.
+
+        Want to work on it? Say so here and follow the
+        [contribution process](https://github.com/microsoft/mxc/blob/main/CONTRIBUTING.md#get-maintainer-agreement-for-features).
+        Wait for maintainer acceptance and any required spec approval and
+        merge before starting implementation.
   - type: textarea
     attributes:
       label: Description of the new feature / enhancement
