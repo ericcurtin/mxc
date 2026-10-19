@@ -192,9 +192,11 @@ public Rust container lifecycle operations are not broadened by P1.
 Distribute the complete `aci-edge-sandboxes/` directory beside the consuming
 executable. The native agent pulls the official example's public Azure Linux
 workload image on the host; guest network access remains ungranted.
-See the [NVX backend guide](https://github.com/microsoft/mxc/blob/main/docs/backends/nanvix/nanvix.md)
-for rejected policy, release pins/attestations, host prerequisites and the
-P2 deployment/hardening and P3 public Rust API boundaries.
+
+The host requires Windows Hypervisor Platform and hardware virtualization.
+Requests cannot include filesystem grants or denials, network or proxy policy,
+UI policy, or capture-denials. Containers must be destroyed after execution,
+without preserving policy.
 
 Backend implementations, shared runtime support, backend dispatch, and host
 probing are internal modules of this published crate. The crate root exposes

@@ -64,9 +64,9 @@ runtime `--experimental` opt-in. This initial slice supports create-and-run
 execution with the command, timeout, guest working directory, and additive
 environment settings. Filesystem, network, proxy, UI, capture-denials,
 non-default lifecycle, streaming, PTY, and container lifecycle operations
-remain fail-closed. Linux MicroVM execution is inactive in this phase. See the
-[NVX backend guide](docs/backends/nanvix/nanvix.md) for release provenance,
-required bundle distribution, and the P1/P2/P3 implementation boundary.
+remain fail-closed. Linux MicroVM execution is inactive. See the
+[NVX integration notes](src/mxc-sdk/README.md#experimental-nvx-create-and-run)
+for build requirements and supported execution.
 
 ## How do I use MXC?
 
