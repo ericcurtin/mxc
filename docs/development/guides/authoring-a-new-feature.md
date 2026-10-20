@@ -16,6 +16,13 @@
 
 ## Prerequisites
 
+The development MicroVM contract illustrates creation-time configuration:
+`microvm.image` is required for both create-and-run and provision, whereas
+`microvm.provision.memoryMib` is provision-only. Keep the image at its permanent
+location, require callers to choose it, and reject missing/blank input before
+opening backend state. Later lifecycle requests cannot replace it. Preserve
+published contracts and SDK targets when changing this experimental surface.
+
 Read these in order:
 
 1. [Configuration schema](../../schema.md): supported policy fields and their

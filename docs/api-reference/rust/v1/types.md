@@ -269,6 +269,26 @@ pub struct FilesystemPolicy {
 }
 ```
 
+## `mxc_sdk::v1::Containment::MicroVm`
+
+Experimental NVX MicroVM selection. Enable the Cargo `microvm` feature and use
+an operation under `mxc_sdk::v1::experimental`. The variant requires an explicit
+registry image reference: `Containment::MicroVm { image: String }`.
+
+## `mxc_sdk::v1::ProvisionRequest::microvm`
+
+Creates a typed experimental MicroVM provision request.
+
+```rust
+pub fn microvm(image: impl Into<String>, memory_mib: Option<u32>) -> ProvisionRequest;
+```
+
+Filesystem and network policy are applied with `set_filesystem` and
+`set_network`. A runtime proxy in the network policy is fixed during
+provisioning. The required image is fixed at creation and cannot be replaced by
+existing-container execution. The signed agent resolves registry references;
+there is no default image.
+
 
 ## `mxc_sdk::v1::policy::filesystem::FilesystemPolicyResult`
 
@@ -634,6 +654,7 @@ Backend-specific metadata returned by a typed lifecycle call.
 ```rust
 pub enum ProvisionMetadata {
   IsolationSessionProvision(IsolationSessionProvisionMetadata),
+  MicroVmProvision(serde_json::Value),
 }
 ```
 
@@ -661,6 +682,7 @@ pub struct ProvisionRequest {
 impl ProvisionRequest {
   pub fn isolation_session(app_id: Option<String>) -> Self;
   pub fn wslc(image: Option<String>, image_tar_path: Option<String>) -> Self;
+  pub fn microvm(image: impl Into<String>, memory_mib: Option<u32>) -> Self;
   pub fn set_filesystem(&mut self, filesystem: FilesystemPolicy) -> &mut Self;
   pub fn set_network(&mut self, network: NetworkPolicy) -> &mut Self;
   pub fn set_telemetry(&mut self, telemetry: TelemetryConfig) -> &mut Self;
