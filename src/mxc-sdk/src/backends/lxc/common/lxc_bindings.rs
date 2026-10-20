@@ -389,58 +389,6 @@ impl LxcContainer {
         }
     }
 
-    fn query_info(&self, field: &str) -> Result<String, String> {
-        let output = self
-            .lxc_command("lxc-info")
-            .args([field, "-H"])
-            .output()
-            .map_err(|e| format!("Failed to inspect container {}: {e}", self.name))?;
-        if !output.status.success() {
-            return Err(format!(
-                "Failed to inspect container {}: {}",
-                self.name,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        String::from_utf8(output.stdout)
-            .map(|stdout| stdout.trim().to_string())
-            .map_err(|e| format!("Invalid lxc-info output for container {}: {e}", self.name))
-    }
-
-    pub(crate) fn is_running_checked(&self) -> Result<bool, String> {
-        match self.query_info("-s")?.as_str() {
-            "RUNNING" => Ok(true),
-            "STOPPED" => Ok(false),
-            state => Err(format!(
-                "Unexpected state for container {}: {state:?}",
-                self.name
-            )),
-        }
-    }
-
-    pub(crate) fn verified_init_pid(&self) -> Result<u32, String> {
-        if !self.is_running_checked()? {
-            return Err(format!("Container {} is not running", self.name));
-        }
-        let pid = self.query_info("-p")?;
-        let init_pid = pid
-            .parse::<u32>()
-            .map_err(|e| format!("Invalid init PID for container {}: {pid:?}: {e}", self.name))?;
-        if init_pid == 0 || !pid.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(format!(
-                "Invalid init PID for container {}: {pid:?}",
-                self.name
-            ));
-        }
-        if self.query_info("-p")? != pid {
-            return Err(format!(
-                "Container {} init PID changed during inspection",
-                self.name
-            ));
-        }
-        Ok(init_pid)
-    }
-
     pub fn init_pid(&self) -> Option<u32> {
         let output = self.lxc_command("lxc-info").arg("-p").output().ok()?;
         if !output.status.success() {
@@ -539,9 +487,7 @@ impl LxcContainer {
         let mut cmd = self.lxc_command("lxc-start");
         cmd.args(["-s", "lxc.cap.drop=sys_admin"]);
         cmd.args(network.to_start_args(self.configured_interface_count()));
-        Self::run_tool(cmd)?;
-        self.verified_init_pid()?;
-        Ok(())
+        Self::run_tool(cmd)
     }
 
     /// How many `lxc.net.N` interfaces the container's config declares.
@@ -570,12 +516,6 @@ impl LxcContainer {
         _timeout_ms: u32,
     ) -> Result<(i32, String, String), String> {
         // TODO: Implement timeout and working directory support.
-        if self.is_running_checked()? {
-            return Err(format!(
-                "Container {} is already running; lxc-execute cannot apply capability restrictions",
-                self.name
-            ));
-        }
         let mut cmd = self.lxc_command("lxc-execute");
         cmd.args(["-s", "lxc.cap.drop=sys_admin"]);
         cmd.args(["--", "/bin/sh", "-c", command]);
@@ -609,7 +549,6 @@ impl LxcContainer {
         // inner shell would ignore Ctrl-C.
         const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
 
-        self.verified_init_pid()?;
         let mut cmd = self.lxc_command("lxc-attach");
         cmd.args(build_attach_args_with_env_control(
             env,
@@ -670,7 +609,6 @@ impl LxcContainer {
         use crate::mxc_common::sandbox_process::{wait_with_timeout, StreamCloser, WaitError};
         use std::process::Stdio;
 
-        self.verified_init_pid()?;
         let mut cmd = self.lxc_command("lxc-attach");
         cmd.args(build_attach_args_with_env_control(
             env,
@@ -769,7 +707,7 @@ impl LxcContainer {
         use std::process::Stdio;
 
         let mut cmd =
-            self.attach_command(command, working_directory, env, force_clear_env, firewall)?;
+            self.attach_command(command, working_directory, env, force_clear_env, firewall);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -794,7 +732,7 @@ impl LxcContainer {
         const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
 
         let mut cmd =
-            self.attach_command(command, working_directory, env, force_clear_env, firewall)?;
+            self.attach_command(command, working_directory, env, force_clear_env, firewall);
         let pty = crate::mxc_pty::LivePty::attach_forwarded(&mut cmd, size, UNBLOCK)
             .map_err(|error| format!("Failed to allocate lxc-attach PTY: {error}"))?;
         let mut child = cmd
@@ -851,8 +789,7 @@ impl LxcContainer {
         env: &[String],
         force_clear_env: bool,
         firewall: ContainerFirewall,
-    ) -> Result<std::process::Command, String> {
-        self.verified_init_pid()?;
+    ) -> std::process::Command {
         let mut cmd = self.lxc_command("lxc-attach");
         cmd.args(build_attach_args_with_env_control(
             env,
@@ -863,7 +800,7 @@ impl LxcContainer {
         if firewall == ContainerFirewall::Installed {
             confine_network_capabilities(&mut cmd);
         }
-        Ok(cmd)
+        cmd
     }
 
     /// Stub for the workspace-wide clippy lane that runs on Windows.
