@@ -41,9 +41,12 @@ function Invoke-MicroVmPhase {
             "--config-base64", $base64
         )
     }
-    $stdout = [IO.Path]::GetTempFileName()
-    $stderr = [IO.Path]::GetTempFileName()
+    $stdout = $null
+    $stderr = $null
+    $process = $null
     try {
+        $stdout = [IO.Path]::GetTempFileName()
+        $stderr = [IO.Path]::GetTempFileName()
         # Native stderr becomes a terminating error under Windows PowerShell 5.1.
         # Redirect at the process boundary so phase handling retains both streams.
         $process = Start-Process -FilePath $WxcExePath -ArgumentList $arguments `
@@ -54,8 +57,15 @@ function Invoke-MicroVmPhase {
             Stderr = [IO.File]::ReadAllText($stderr)
         }
     } finally {
-        Remove-Item $stdout -Force -ErrorAction SilentlyContinue
-        Remove-Item $stderr -Force -ErrorAction SilentlyContinue
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
+        if ($null -ne $stdout) {
+            Remove-Item $stdout -Force -ErrorAction SilentlyContinue
+        }
+        if ($null -ne $stderr) {
+            Remove-Item $stderr -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
