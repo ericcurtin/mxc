@@ -212,19 +212,51 @@ fn spawn_streaming_with(
             return Err(error);
         }
     };
-    Ok(Box::new(NvxOneShotProcess {
+    Ok(Box::new(NvxOneShotProcess::new(
         inner,
-        teardown: Some(Box::new(move || {
-            cleanup_sandbox(client, sandbox_id, state_root)
-        })),
-        cleanup_failure: None,
-    }))
+        Box::new(move || cleanup_sandbox(client, sandbox_id, state_root)),
+    )))
+}
+
+type Teardown = Box<dyn FnOnce() -> std::io::Result<()> + Send>;
+type PendingTeardown = std::sync::Arc<std::sync::Mutex<Option<Teardown>>>;
+
+#[derive(Clone)]
+struct CachedIoError {
+    kind: std::io::ErrorKind,
+    message: String,
+}
+
+impl CachedIoError {
+    fn capture(error: std::io::Error) -> Self {
+        Self {
+            kind: error.kind(),
+            message: error.to_string(),
+        }
+    }
+
+    fn restore(&self) -> std::io::Error {
+        std::io::Error::new(self.kind, self.message.clone())
+    }
+}
+
+enum CleanupState {
+    Pending {
+        task: PendingTeardown,
+        launch_error: Option<CachedIoError>,
+    },
+    Running {
+        worker: std::thread::JoinHandle<std::io::Result<()>>,
+    },
+    Finished {
+        result: Result<(), CachedIoError>,
+    },
 }
 
 struct NvxOneShotProcess {
     inner: Box<dyn SandboxProcess>,
-    teardown: Option<Box<dyn FnOnce() -> std::io::Result<()> + Send>>,
-    cleanup_failure: Option<String>,
+    terminal: Option<Result<i32, CachedIoError>>,
+    cleanup: CleanupState,
 }
 
 fn cleanup_sandbox(
@@ -278,17 +310,119 @@ fn finish_cleanup(
 }
 
 impl NvxOneShotProcess {
-    fn cleanup(&mut self) -> std::io::Result<()> {
-        if let Some(error) = &self.cleanup_failure {
-            return Err(std::io::Error::other(error.clone()));
+    fn new(inner: Box<dyn SandboxProcess>, teardown: Teardown) -> Self {
+        Self {
+            inner,
+            terminal: None,
+            cleanup: CleanupState::Pending {
+                task: std::sync::Arc::new(std::sync::Mutex::new(Some(teardown))),
+                launch_error: None,
+            },
         }
-        let result = match self.teardown.take() {
-            Some(teardown) => teardown(),
-            None => Ok(()),
+    }
+
+    fn start_cleanup(&mut self) {
+        self.start_cleanup_with(|task| {
+            std::thread::Builder::new()
+                .name("mxc-nvx-teardown".to_owned())
+                .spawn(task)
+        });
+    }
+
+    fn start_cleanup_with(
+        &mut self,
+        spawn: impl FnOnce(Teardown) -> std::io::Result<std::thread::JoinHandle<std::io::Result<()>>>,
+    ) {
+        let CleanupState::Pending {
+            task,
+            launch_error: None,
+        } = &self.cleanup
+        else {
+            return;
         };
-        if let Err(error) = &result {
-            self.cleanup_failure = Some(error.to_string());
+        // Keep ownership here if the OS refuses to spawn and drops the worker closure.
+        let worker_task = std::sync::Arc::clone(task);
+        match spawn(Box::new(move || run_pending_teardown(&worker_task))) {
+            Ok(worker) => self.cleanup = CleanupState::Running { worker },
+            Err(error) => {
+                if let CleanupState::Pending { launch_error, .. } = &mut self.cleanup {
+                    *launch_error = Some(CachedIoError::capture(std::io::Error::other(format!(
+                        "cannot start NVX cleanup worker: {error}; teardown remains owned until wait or Drop"
+                    ))));
+                }
+            }
         }
+    }
+
+    fn cleanup(&mut self, blocking: bool) -> std::io::Result<bool> {
+        match &self.cleanup {
+            CleanupState::Finished { result } => {
+                return result
+                    .as_ref()
+                    .map(|()| true)
+                    .map_err(CachedIoError::restore);
+            }
+            CleanupState::Running { worker } if !blocking && !worker.is_finished() => {
+                return Ok(false);
+            }
+            CleanupState::Pending { launch_error, .. } if !blocking => {
+                return match launch_error {
+                    Some(error) => Err(error.restore()),
+                    None => Ok(false),
+                };
+            }
+            _ => {}
+        }
+        let state = std::mem::replace(&mut self.cleanup, CleanupState::Finished { result: Ok(()) });
+        let result = match state {
+            CleanupState::Pending { task, launch_error } => {
+                let result = run_pending_teardown(&task);
+                match launch_error {
+                    Some(error) => finish_wait(Err(error.restore()), result),
+                    None => result,
+                }
+            }
+            CleanupState::Running { worker } => worker.join().unwrap_or_else(|_| {
+                Err(std::io::Error::other(
+                    "NVX cleanup worker panicked; teardown completion is unknown",
+                ))
+            }),
+            CleanupState::Finished { result } => result.map_err(|error| error.restore()),
+        };
+        self.cleanup = CleanupState::Finished {
+            result: result.map_err(CachedIoError::capture),
+        };
+        self.cleanup(blocking)
+    }
+
+    fn terminal_result(&self) -> std::io::Result<i32> {
+        match &self.terminal {
+            Some(Ok(code)) => Ok(*code),
+            Some(Err(error)) => Err(error.restore()),
+            None => Err(std::io::Error::other("NVX process has no terminal outcome")),
+        }
+    }
+}
+
+fn run_pending_teardown(task: &PendingTeardown) -> std::io::Result<()> {
+    let (teardown, poisoned) = match task.lock() {
+        Ok(mut pending) => (pending.take(), false),
+        Err(poisoned) => (poisoned.into_inner().take(), true),
+    };
+    let result = match teardown {
+        Some(teardown) => teardown(),
+        None => Err(std::io::Error::other(
+            "NVX teardown task was already consumed",
+        )),
+    };
+    if poisoned {
+        finish_wait(
+            Err(std::io::Error::other(
+                "NVX teardown ownership lock was poisoned",
+            )),
+            result,
+        )
+    } else {
         result
     }
 }
@@ -337,12 +471,17 @@ impl SandboxProcess for NvxOneShotProcess {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
-        match self.inner.try_wait() {
-            Ok(None) => Ok(None),
-            result => {
-                let cleanup = self.cleanup();
-                finish_wait(result, cleanup)
+        if self.terminal.is_none() {
+            match self.inner.try_wait() {
+                Ok(None) => return Ok(None),
+                Ok(Some(code)) => self.terminal = Some(Ok(code)),
+                Err(error) => self.terminal = Some(Err(CachedIoError::capture(error))),
             }
+        }
+        self.start_cleanup();
+        match self.cleanup(false) {
+            Ok(false) => Ok(None),
+            cleanup => finish_wait(self.terminal_result().map(Some), cleanup.map(|_| ())),
         }
     }
 
@@ -359,26 +498,30 @@ impl SandboxProcess for NvxOneShotProcess {
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
-        let result = self.inner.wait();
-        let cleanup = self.cleanup();
-        finish_wait(result, cleanup)
+        if self.terminal.is_none() {
+            self.terminal = Some(self.inner.wait().map_err(CachedIoError::capture));
+        }
+        let cleanup = self.cleanup(true);
+        finish_wait(self.terminal_result(), cleanup.map(|_| ()))
     }
 }
 
 impl Drop for NvxOneShotProcess {
     fn drop(&mut self) {
-        if self.teardown.is_some() {
+        if self.terminal.is_none() {
             match self.inner.kill() {
                 Ok(()) => {
-                    if let Err(error) = self.inner.wait() {
+                    let result = self.inner.wait();
+                    if let Err(error) = &result {
                         eprintln!("NVX wait during Drop failed: {error}");
                     }
+                    self.terminal = Some(result.map_err(CachedIoError::capture));
                 }
                 Err(error) => eprintln!("NVX cancellation during Drop refused: {error}"),
             }
-            if let Err(error) = self.cleanup() {
-                eprintln!("NVX teardown during Drop failed: {error}");
-            }
+        }
+        if let Err(error) = self.cleanup(true) {
+            eprintln!("NVX teardown during Drop failed: {error}");
         }
     }
 }
@@ -524,6 +667,17 @@ mod tests {
     use super::super::test_support::Fixture;
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    fn poll_terminal(process: &mut dyn SandboxProcess) -> std::io::Result<i32> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match process.try_wait() {
+                Ok(None) if std::time::Instant::now() < deadline => std::thread::yield_now(),
+                Ok(None) => return Err(std::io::Error::other("terminal poll exceeded test bound")),
+                result => return result.map(|code| code.unwrap()),
+            }
+        }
+    }
 
     fn streaming_request() -> ExecutionRequest {
         ExecutionRequest {
@@ -800,6 +954,20 @@ mod tests {
                         } else {
                             process.wait()
                         };
+                        let expected = first
+                            .as_ref()
+                            .copied()
+                            .map_err(|error| (error.kind(), error.to_string()));
+                        for _ in 0..3 {
+                            let repeated = process
+                                .try_wait()
+                                .map(|code| code.unwrap())
+                                .map_err(|error| (error.kind(), error.to_string()));
+                            assert_eq!(
+                                repeated, expected,
+                                "repeated poll lost terminal or cleanup failure"
+                            );
+                        }
                         let cleanup_failed = stop_fails || deprovision_fails;
                         if cleanup_failed || terminal == "wait_error" {
                             let error = first.unwrap_err();
@@ -861,6 +1029,183 @@ mod tests {
         }
     }
 
+    #[test]
+    fn real_streaming_poll_is_prompt_while_cleanup_blocks_and_wait_or_drop_joins() {
+        use super::super::test_support::CleanupGate;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        for terminal in ["exit", "timeout", "wait_error"] {
+            for cleanup_fails in [false, true] {
+                for drop_barrier in [false, true] {
+                    let gate = Arc::new(CleanupGate::default());
+                    let fixture = Fixture {
+                        fail: (terminal == "wait_error").then_some("wait"),
+                        outcome: Some(if terminal == "timeout" {
+                            aci_edge_sandboxes::ExecOutcome::TimedOut
+                        } else {
+                            aci_edge_sandboxes::ExecOutcome::Exited(7)
+                        }),
+                        stop_fails: cleanup_fails,
+                        deprovision_fails: cleanup_fails,
+                        stop_gate: Some(Arc::clone(&gate)),
+                        ..Default::default()
+                    };
+                    let (launched, root) = injected_launch(&streaming_request(), &fixture, false);
+                    let mut process = launched.unwrap();
+                    let worker_gate = Arc::clone(&gate);
+                    let (polled, polling) = std::sync::mpsc::channel();
+                    let (done, completion) = std::sync::mpsc::channel();
+                    let worker = std::thread::spawn(move || {
+                        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                        let mut observations = Vec::new();
+                        while !worker_gate.entered.load(Ordering::Acquire)
+                            && std::time::Instant::now() < deadline
+                        {
+                            observations
+                                .push(process.try_wait().map_err(|error| error.to_string()));
+                            std::thread::yield_now();
+                        }
+                        for _ in 0..3 {
+                            observations
+                                .push(process.try_wait().map_err(|error| error.to_string()));
+                        }
+                        polled.send(observations).unwrap();
+                        if drop_barrier {
+                            drop(process);
+                            done.send(None).unwrap();
+                        } else {
+                            let first = process
+                                .wait()
+                                .map_err(|error| (error.kind(), error.to_string()));
+                            let repeated = (0..3)
+                                .map(|_| {
+                                    process
+                                        .try_wait()
+                                        .map(|code| code.unwrap())
+                                        .map_err(|error| (error.kind(), error.to_string()))
+                                })
+                                .collect::<Vec<_>>();
+                            let last = process
+                                .wait()
+                                .map_err(|error| (error.kind(), error.to_string()));
+                            drop(process);
+                            done.send(Some((first, repeated, last))).unwrap();
+                        }
+                    });
+                    let pending = polling.recv_timeout(Duration::from_secs(2));
+                    let before_release = completion.recv_timeout(Duration::from_millis(30));
+                    // Release even if synchronous teardown regresses and the first poll is parked.
+                    gate.release();
+                    let finished = completion.recv_timeout(Duration::from_secs(2));
+                    worker.join().unwrap();
+                    let pending = pending.expect("try_wait blocked inside sandbox teardown");
+                    assert!(
+                        gate.entered.load(Ordering::Acquire),
+                        "positive control never entered stop"
+                    );
+                    assert!(!pending.is_empty());
+                    assert!(
+                        pending.iter().all(|result| matches!(result, Ok(None))),
+                        "{pending:?}"
+                    );
+                    assert!(
+                        matches!(
+                            before_release,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                        ),
+                        "wait/Drop returned before owned teardown finished"
+                    );
+                    if let Some((first, repeated, last)) = finished.unwrap() {
+                        for result in repeated.into_iter().chain([last]) {
+                            assert_eq!(result, first);
+                        }
+                        if cleanup_fails {
+                            let (kind, message) = first.unwrap_err();
+                            assert_eq!(kind, std::io::ErrorKind::Other);
+                            assert!(message.contains("injected stop failure"));
+                            assert!(message.contains("injected deprovision failure"));
+                            assert!(message.contains(&root.display().to_string()));
+                            if terminal == "timeout" {
+                                assert!(message.contains("the exec timed out"));
+                            } else if terminal == "wait_error" {
+                                assert!(message.contains("injected wait failure"));
+                            }
+                        } else {
+                            match terminal {
+                                "timeout" => {
+                                    assert_eq!(first.unwrap_err().0, std::io::ErrorKind::TimedOut)
+                                }
+                                "wait_error" => {
+                                    assert!(first.unwrap_err().1.contains("injected wait failure"))
+                                }
+                                _ => assert_eq!(first.unwrap(), 7),
+                            }
+                        }
+                    }
+                    let events = fixture.events.lock().unwrap();
+                    for event in ["stop", "deprovision", "wait"] {
+                        assert_eq!(
+                            events.iter().filter(|&&entry| entry == event).count(),
+                            1,
+                            "{events:?}"
+                        );
+                    }
+                    assert_eq!(root.exists(), cleanup_fails);
+                    if cleanup_fails {
+                        std::fs::remove_dir(root).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cleanup_worker_spawn_failure_preserves_task_for_wait_and_drop() {
+        for terminal in ["exit", "timeout", "wait_error"] {
+            for drop_barrier in [false, true] {
+                let (mut process, events) = test_process(false, true, false);
+                process.terminal = Some(match terminal {
+                    "timeout" => Err(CachedIoError::capture(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "workload timed out",
+                    ))),
+                    "wait_error" => Err(CachedIoError::capture(std::io::Error::other(
+                        "native waiter failed",
+                    ))),
+                    _ => Ok(7),
+                });
+                process.start_cleanup_with(|_| {
+                    Err(std::io::Error::other("injected thread spawn failure"))
+                });
+                process.start_cleanup_with(|_| panic!("failed worker creation must not retry"));
+                for _ in 0..3 {
+                    let error = process.try_wait().unwrap_err();
+                    assert_eq!(error.kind(), std::io::ErrorKind::Other);
+                    assert!(error.to_string().contains("injected thread spawn failure"));
+                    if terminal == "timeout" {
+                        assert!(error.to_string().contains("workload timed out"));
+                    } else if terminal == "wait_error" {
+                        assert!(error.to_string().contains("native waiter failed"));
+                    }
+                }
+                assert!(
+                    events.lock().unwrap().is_empty(),
+                    "poll must not perform synchronous cleanup"
+                );
+                if !drop_barrier {
+                    let error = process.wait().unwrap_err().to_string();
+                    assert!(error.contains("injected thread spawn failure"));
+                    assert!(error.contains("recovery at test-root"));
+                    assert_eq!(process.try_wait().unwrap_err().to_string(), error);
+                    assert_eq!(process.wait().unwrap_err().to_string(), error);
+                }
+                drop(process);
+                assert_eq!(*events.lock().unwrap(), ["cleanup"]);
+            }
+        }
+    }
+
     struct TestProcess {
         events: Arc<Mutex<Vec<&'static str>>>,
         timeout: bool,
@@ -912,13 +1257,13 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let cleanup_events = Arc::clone(&events);
         (
-            NvxOneShotProcess {
-                inner: Box::new(TestProcess {
+            NvxOneShotProcess::new(
+                Box::new(TestProcess {
                     events: Arc::clone(&events),
                     timeout,
                     refuse_kill,
                 }),
-                teardown: Some(Box::new(move || {
+                Box::new(move || {
                     cleanup_events.lock().unwrap().push("cleanup");
                     if cleanup_fails {
                         Err(std::io::Error::other(
@@ -927,9 +1272,8 @@ mod tests {
                     } else {
                         Ok(())
                     }
-                })),
-                cleanup_failure: None,
-            },
+                }),
+            ),
             events,
         )
     }
@@ -941,7 +1285,7 @@ mod tests {
                 for poll in [false, true] {
                     let (mut process, events) = test_process(timeout, cleanup_fails, false);
                     let result = if poll {
-                        process.try_wait().map(|value| value.unwrap())
+                        poll_terminal(&mut process)
                     } else {
                         process.wait()
                     };
@@ -1003,14 +1347,13 @@ mod tests {
                 }),
             })
             .unwrap();
-        let process = NvxOneShotProcess {
-            inner: Box::new(inner),
-            teardown: Some(Box::new(move || {
+        let process = NvxOneShotProcess::new(
+            Box::new(inner),
+            Box::new(move || {
                 cleanup_events.lock().unwrap().push("cleanup");
                 Ok(())
-            })),
-            cleanup_failure: None,
-        };
+            }),
+        );
         let (done, completion) = std::sync::mpsc::channel();
         let join = std::thread::spawn(move || {
             drop(process);
@@ -1116,14 +1459,13 @@ mod tests {
         }
         let stdout = Arc::new((Mutex::new(false), Condvar::new()));
         let stderr = Arc::new((Mutex::new(false), Condvar::new()));
-        let process = NvxOneShotProcess {
-            inner: Box::new(CaptureProcess {
+        let process = NvxOneShotProcess::new(
+            Box::new(CaptureProcess {
                 stdout: Arc::clone(&stdout),
                 stderr: Arc::clone(&stderr),
             }),
-            teardown: Some(Box::new(|| Ok(()))),
-            cleanup_failure: None,
-        };
+            Box::new(|| Ok(())),
+        );
         let (tx, rx) = std::sync::mpsc::channel();
         let join = std::thread::spawn(move || {
             tx.send(crate::sandbox::MxcProcess::new(Box::new(process)).wait_with_output())

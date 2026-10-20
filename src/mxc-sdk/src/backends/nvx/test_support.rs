@@ -21,6 +21,30 @@ pub(super) struct Fixture {
     pub require_stdin_eof: bool,
     pub stdin_reader: Arc<Mutex<Option<aci_edge_sandboxes::InputSource>>>,
     pub stdin_closer: Arc<Mutex<Option<aci_edge_sandboxes::InputCloser>>>,
+    pub stop_gate: Option<Arc<CleanupGate>>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct CleanupGate {
+    pub entered: std::sync::atomic::AtomicBool,
+    released: Mutex<bool>,
+    wake: std::sync::Condvar,
+}
+
+impl CleanupGate {
+    pub fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.wake.notify_all();
+    }
+
+    fn wait(&self) {
+        self.entered
+            .store(true, std::sync::atomic::Ordering::Release);
+        let mut released = self.released.lock().unwrap();
+        while !*released {
+            released = self.wake.wait(released).unwrap();
+        }
+    }
 }
 
 impl Fixture {
@@ -120,6 +144,9 @@ impl Backend for Fixture {
 
     fn stop(&self, _id: &SandboxId) -> aci_edge_sandboxes::Result<StopResult> {
         self.event("stop")?;
+        if let Some(gate) = &self.stop_gate {
+            gate.wait();
+        }
         if self.stop_fails {
             Err(Error::backend_error("injected stop failure"))
         } else {

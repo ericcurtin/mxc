@@ -70,6 +70,179 @@ fn process_only_request(command: &str) -> serde_json::Value {
     })
 }
 
+fn lifecycle_provision_request() -> serde_json::Value {
+    serde_json::json!({
+        "version": "1.1.0-alpha",
+        "phase": "provision",
+        "containment": "microvm",
+        "microvm": {"image": "mcr.microsoft.com/azurelinux/base/core:3.0"}
+    })
+}
+
+fn assert_provision_image(
+    parsed: &mxc_sdk::mxc_common::state_aware_request::ParsedStateAwareRequest,
+) {
+    use mxc_sdk::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
+    match parsed.operation() {
+        StateAwareOperation::Provision(StateAwareProvision::MicroVm(Some(config))) => {
+            assert_eq!(config.image, "mcr.microsoft.com/azurelinux/base/core:3.0");
+            assert_eq!(config.memory_mib, None);
+        }
+        other => panic!("expected image-bearing MicroVM provision, got {other:?}"),
+    }
+}
+
+#[test]
+fn ignored_vm_lifecycle_payload_parses_with_required_image_without_a_runtime() {
+    use mxc_sdk::mxc_common::{
+        config_parser::load_mxc_request_from_json,
+        logger::{Logger, Mode},
+        state_aware_request::MxcRequest,
+    };
+    let request = lifecycle_provision_request();
+    let parsed =
+        load_mxc_request_from_json(&request.to_string(), &mut Logger::new(Mode::Buffer)).unwrap();
+    match parsed {
+        MxcRequest::StateAware(parsed) => assert_provision_image(&parsed),
+        other => panic!("expected lifecycle provision, got {other:?}"),
+    }
+    let mut invalid = request;
+    invalid.as_object_mut().unwrap().remove("microvm");
+    let error = mxc_sdk::__ffi::run_lifecycle_json(&invalid.to_string(), false, true).unwrap_err();
+    assert_eq!(error.code, ErrorCode::MalformedRequest);
+    assert!(error.message.contains("microvm"));
+}
+
+#[test]
+fn powershell_authored_lifecycle_payload_parses_without_executing_the_cli() {
+    use mxc_sdk::mxc_common::{
+        config_parser::load_state_aware_request_from_json_with_options,
+        logger::{Logger, Mode},
+        state_aware_request::Phase,
+    };
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("scripts")
+        .join("run_microvm_state_aware_tests.ps1");
+    let output_file = tempfile::tempfile().unwrap();
+    let mut child = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(script)
+        .args([
+            "-PrintProvisionPayload",
+            "-WxcExePath",
+            "must-not-execute.exe",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(output_file.try_clone().unwrap())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("read-only PowerShell payload export exceeded deadline");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    use std::io::{Seek, SeekFrom};
+    let mut output_file = output_file;
+    output_file.seek(SeekFrom::Start(0)).unwrap();
+    let mut json = String::new();
+    output_file.read_to_string(&mut json).unwrap();
+    let parsed = load_state_aware_request_from_json_with_options(
+        &json,
+        &mut Logger::new(Mode::Buffer),
+        Phase::Provision,
+        None,
+        &[],
+    )
+    .unwrap();
+    assert_provision_image(&parsed);
+    let mut invalid: serde_json::Value = serde_json::from_str(&json).unwrap();
+    invalid["microvm"].as_object_mut().unwrap().remove("image");
+    let error = load_state_aware_request_from_json_with_options(
+        &invalid.to_string(),
+        &mut Logger::new(Mode::Buffer),
+        Phase::Provision,
+        None,
+        &[],
+    )
+    .unwrap_err();
+    match error {
+        mxc_sdk::mxc_common::config_parser::ParseError::StateAware(error) => {
+            assert_eq!(
+                error.code,
+                mxc_sdk::mxc_common::mxc_error::MxcErrorCode::MalformedRequest
+            );
+            assert!(error.message.contains("missing field `image`"), "{error}");
+        }
+        other => panic!("expected malformed lifecycle image, got {other:?}"),
+    }
+}
+
+#[test]
+fn microvm_sample_creation_corpus_parses_with_explicit_images() {
+    use mxc_sdk::mxc_common::{
+        config_parser::load_mxc_request_from_json,
+        logger::{Logger, Mode},
+        state_aware_request::MxcRequest,
+    };
+    let configs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("configs");
+    let mut count = 0;
+    for entry in std::fs::read_dir(configs).unwrap() {
+        let path = entry.unwrap().path();
+        if !path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("microvm_")
+            || path.extension().is_none_or(|extension| extension != "json")
+        {
+            continue;
+        }
+        let json = std::fs::read_to_string(&path).unwrap();
+        let parsed = load_mxc_request_from_json(&json, &mut Logger::new(Mode::Buffer))
+            .unwrap_or_else(|error| panic!("{}: {error:?}", path.display()));
+        match parsed {
+            MxcRequest::OneShot(request) => assert!(
+                request
+                    .microvm_image
+                    .as_ref()
+                    .is_some_and(|image| !image.is_empty()),
+                "{} lost its explicit image",
+                path.display()
+            ),
+            other => panic!("{}: unexpected {other:?}", path.display()),
+        }
+        count += 1;
+    }
+    assert_eq!(
+        count, 16,
+        "creation corpus changed; review explicit image coverage"
+    );
+}
+
 fn run_nonce(label: &str) {
     let nonce = format!(
         "{label}-{}-{}",
@@ -420,11 +593,7 @@ fn lifecycle_filesystem_policy_is_enforced() {
 #[test]
 #[ignore = "requires Windows x64, WHP, the staged signed NVX bundle, and MCR access"]
 fn exact_json_lifecycle_routes_microvm_end_to_end() {
-    let provision = serde_json::json!({
-        "version": "1.1.0-alpha",
-        "phase": "provision",
-        "containment": "microvm"
-    });
+    let provision = lifecycle_provision_request();
     let response = mxc_sdk::__ffi::run_lifecycle_json(&provision.to_string(), false, true).unwrap();
     let envelope: serde_json::Value = serde_json::from_str(&response).unwrap();
     let id = envelope["result"]["sandboxId"].as_str().unwrap();

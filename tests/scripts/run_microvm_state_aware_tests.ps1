@@ -2,10 +2,20 @@
 # Licensed under the MIT License.
 
 param(
-    [string]$WxcExePath
+    [string]$WxcExePath,
+    [switch]$PrintProvisionPayload
 )
 
 $ErrorActionPreference = "Stop"
+$ProvisionPayload = @{
+    version = "1.1.0-alpha"
+    containment = "microvm"
+    microvm = @{ image = "mcr.microsoft.com/azurelinux/base/core:3.0" }
+}
+if ($PrintProvisionPayload) {
+    $ProvisionPayload | ConvertTo-Json -Compress -Depth 12
+    return
+}
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not $WxcExePath) {
     $WxcExePath = Join-Path $RepoRoot "src\target\x86_64-pc-windows-msvc\debug\wxc-exec.exe"
@@ -44,10 +54,7 @@ function Invoke-MicroVmPhase {
     }
 }
 
-$provision = Invoke-MicroVmPhase -Phase "provision" -Payload @{
-    version = "1.1.0-alpha"
-    containment = "microvm"
-}
+$provision = Invoke-MicroVmPhase -Phase "provision" -Payload $ProvisionPayload
 if ($provision.ExitCode -ne 0) {
     throw "provision failed: $($provision.Stderr)"
 }
