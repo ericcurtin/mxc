@@ -6,17 +6,13 @@
 //! `IsolationSessionManager` because the OS service may idle-restart
 //! between caller invocations.
 
-use std::io::{self, IsTerminal};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
+use std::io::IsTerminal;
 
 use serde::Serialize;
 
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ExecutionRequest, IsolationSessionProvisionConfig};
 use crate::mxc_common::mxc_error::MxcError;
-use crate::mxc_common::process_util::OwnedHandle;
 use crate::mxc_common::sandbox_process::{PtySize, SandboxProcess};
 use crate::mxc_common::state_aware_backend::{
     DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult, StartResult,
@@ -26,20 +22,10 @@ use crate::mxc_common::validator::{
     validate_state_aware_network_policy_support, NetworkPolicySupport,
 };
 
-use windows::Win32::Foundation::{
-    ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, ERROR_WRITE_FAULT, HANDLE, WAIT_OBJECT_0,
-    WAIT_TIMEOUT,
-};
-use windows::Win32::Storage::FileSystem::WriteFile;
-use windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
-use windows::Win32::System::Threading::{
-    CreateThread, GetExitCodeThread, WaitForSingleObject, THREAD_CREATION_FLAGS,
-};
-use windows::Win32::System::IO::CancelSynchronousIo;
+use windows::Win32::Foundation::HANDLE;
 
 use super::error::map_lifecycle_error;
 use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
-use super::pipe_relay::{duplicate_handle, OUTPUT_RELAY_TRUNCATION_WARNING};
 use super::policy::{
     reject_unhonorable_environment, validate_post_provision_policy, validate_provision_policy,
 };
@@ -93,57 +79,6 @@ fn wants_interactive_console(stdio: ExecStdio, host_is_terminal: impl FnOnce() -
     match stdio {
         ExecStdio::Relayed => host_is_terminal(),
         ExecStdio::Piped => false,
-    }
-}
-
-struct TruncationWarningParams {
-    stderr: OwnedHandle,
-    stopped: Arc<AtomicBool>,
-}
-
-// The thread owns the parameters and reports the write's HRESULT as its exit code.
-unsafe extern "system" fn truncation_warning_thread(param: *mut core::ffi::c_void) -> u32 {
-    // SAFETY: start_truncation_warning transfers this box to the thread exactly once.
-    let params = unsafe { Box::from_raw(param as *mut TruncationWarningParams) };
-    if params.stopped.load(Ordering::Acquire) {
-        return ERROR_OPERATION_ABORTED.to_hresult().0 as u32;
-    }
-    let message = format!("{OUTPUT_RELAY_TRUNCATION_WARNING}\n");
-    let mut written = 0;
-    // SAFETY: the owned handle and message remain valid until WriteFile returns.
-    match unsafe {
-        WriteFile(
-            params.stderr.get(),
-            Some(message.as_bytes()),
-            Some(&mut written),
-            None,
-        )
-    } {
-        Ok(()) if written as usize == message.len() => 0,
-        Ok(()) => ERROR_WRITE_FAULT.to_hresult().0 as u32,
-        Err(error) => error.code().0 as u32,
-    }
-}
-
-fn start_truncation_warning(params: TruncationWarningParams) -> windows::core::Result<OwnedHandle> {
-    let raw = Box::into_raw(Box::new(params));
-    // SAFETY: the procedure takes ownership of raw only if thread creation succeeds.
-    match unsafe {
-        CreateThread(
-            None,
-            0,
-            Some(truncation_warning_thread),
-            Some(raw.cast()),
-            THREAD_CREATION_FLAGS(0),
-            None,
-        )
-    } {
-        Ok(thread) => Ok(OwnedHandle::new(thread)),
-        Err(error) => {
-            // SAFETY: no thread was created, so the box still belongs to this caller.
-            drop(unsafe { Box::from_raw(raw) });
-            Err(error)
-        }
     }
 }
 
@@ -381,71 +316,9 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
                 );
 
                 let mut logger = Logger::inherit_thread_diagnostic_sink();
-                let result = manager
+                let exit_code = manager
                     .create_process(&options, Some(&mut logger))
                     .map_err(map_lifecycle_error)?;
-                let exit_code = result.exit_code;
-
-                if result.output_may_be_truncated {
-                    let warning_result = (|| {
-                        // GetStdHandle returns a borrowed handle; the worker owns a duplicate.
-                        let stderr =
-                            unsafe { GetStdHandle(STD_ERROR_HANDLE) }.map_err(io::Error::other)?;
-                        let stderr = duplicate_handle(stderr).map_err(io::Error::other)?;
-                        let stopped = Arc::new(AtomicBool::new(false));
-                        let thread = start_truncation_warning(TruncationWarningParams {
-                            stderr,
-                            stopped: Arc::clone(&stopped),
-                        })
-                        .map_err(io::Error::other)?;
-                        // SAFETY: thread owns a valid thread handle throughout the wait.
-                        let wait = unsafe { WaitForSingleObject(thread.get(), 1000) };
-                        if wait == WAIT_OBJECT_0 {
-                            let mut code = 0;
-                            unsafe { GetExitCodeThread(thread.get(), &mut code) }
-                                .map_err(io::Error::other)?;
-                            return windows::core::HRESULT(code as i32)
-                                .ok()
-                                .map_err(io::Error::other);
-                        }
-                        let error = if wait == WAIT_TIMEOUT {
-                            io::Error::new(
-                                io::ErrorKind::TimedOut,
-                                "stderr warning write timed out",
-                            )
-                        } else {
-                            io::Error::last_os_error()
-                        };
-                        stopped.store(true, Ordering::Release);
-                        let cancelling = Instant::now();
-                        loop {
-                            // Retry to catch a worker paused between its stop check and WriteFile.
-                            if let Err(error) = unsafe { CancelSynchronousIo(thread.get()) } {
-                                if error.code() != ERROR_NOT_FOUND.to_hresult() {
-                                    return Err(io::Error::other(error));
-                                }
-                            }
-                            match unsafe { WaitForSingleObject(thread.get(), 10) } {
-                                WAIT_OBJECT_0 => break,
-                                WAIT_TIMEOUT if cancelling.elapsed().as_millis() < 1000 => continue,
-                                WAIT_TIMEOUT => {
-                                    // The worker retains its data and handle if cancellation stalls.
-                                    return Err(io::Error::new(
-                                        io::ErrorKind::TimedOut,
-                                        "stderr warning writer did not stop after cancellation",
-                                    ));
-                                }
-                                _ => return Err(io::Error::last_os_error()),
-                            }
-                        }
-                        Err(error)
-                    })();
-                    if let Err(error) = warning_result {
-                        logger.log_line(&format!(
-                            "Could not write isolation session truncation warning to stderr: {error}"
-                        ));
-                    }
-                }
 
                 // The output relay completed inside `create_process`. The
                 // dispatcher sees zero pipe handles, skips its own relay setup,
@@ -502,124 +375,6 @@ mod tests {
         ProxyConfig,
     };
     use crate::mxc_common::mxc_error::MxcErrorCode;
-    use std::fs::File;
-    use std::os::windows::io::AsRawHandle;
-
-    fn warning_test_pipe() -> (File, OwnedHandle) {
-        use windows::Win32::System::Pipes::CreatePipe;
-
-        let mut read = HANDLE::default();
-        let mut write = HANDLE::default();
-        // SAFETY: both out pointers are valid; the handles are owned below.
-        unsafe { CreatePipe(&mut read, &mut write, None, 4096).unwrap() };
-        (
-            File::from(OwnedHandle::new(read).try_into_std_owned_handle().unwrap()),
-            OwnedHandle::new(write),
-        )
-    }
-
-    fn warning_thread_result(thread: &OwnedHandle) -> io::Result<()> {
-        assert_eq!(
-            unsafe { WaitForSingleObject(thread.get(), 1000) },
-            WAIT_OBJECT_0
-        );
-        let mut code = 0;
-        unsafe { GetExitCodeThread(thread.get(), &mut code).unwrap() };
-        windows::core::HRESULT(code as i32)
-            .ok()
-            .map_err(io::Error::other)
-    }
-
-    #[test]
-    fn truncation_thread_writes_only_the_fixed_warning() {
-        use std::io::Read;
-
-        let (mut read, write) = warning_test_pipe();
-        let thread = start_truncation_warning(TruncationWarningParams {
-            stderr: write,
-            stopped: Arc::new(AtomicBool::new(false)),
-        })
-        .unwrap();
-        warning_thread_result(&thread).unwrap();
-
-        let mut output = String::new();
-        read.read_to_string(&mut output).unwrap();
-        assert_eq!(output, format!("{OUTPUT_RELAY_TRUNCATION_WARNING}\n"));
-    }
-
-    #[test]
-    fn truncation_thread_reports_a_closed_pipe() {
-        let (read, write) = warning_test_pipe();
-        drop(read);
-        let thread = start_truncation_warning(TruncationWarningParams {
-            stderr: write,
-            stopped: Arc::new(AtomicBool::new(false)),
-        })
-        .unwrap();
-        assert!(warning_thread_result(&thread).is_err());
-    }
-
-    #[test]
-    fn relayed_warning_to_a_full_pipe_cancels_and_releases_its_handle() {
-        use std::io::Read;
-        use windows::Win32::Foundation::ERROR_BROKEN_PIPE;
-        use windows::Win32::System::Pipes::PeekNamedPipe;
-
-        let (mut read, write) = warning_test_pipe();
-        let mut written = 0;
-        unsafe { WriteFile(write.get(), Some(&[b'x'; 4096]), Some(&mut written), None).unwrap() };
-        assert_eq!(written, 4096);
-        let stopped = Arc::new(AtomicBool::new(false));
-        let thread = start_truncation_warning(TruncationWarningParams {
-            stderr: write,
-            stopped: Arc::clone(&stopped),
-        })
-        .unwrap();
-        let started = Instant::now();
-        assert_eq!(
-            unsafe { WaitForSingleObject(thread.get(), 50) },
-            WAIT_TIMEOUT
-        );
-        stopped.store(true, Ordering::Release);
-        loop {
-            if let Err(error) = unsafe { CancelSynchronousIo(thread.get()) } {
-                assert_eq!(error.code(), ERROR_NOT_FOUND.to_hresult());
-            }
-            if unsafe { WaitForSingleObject(thread.get(), 10) } == WAIT_OBJECT_0 {
-                break;
-            }
-            assert!(
-                started.elapsed().as_secs() < 3,
-                "warning writer did not stop"
-            );
-        }
-        assert!(warning_thread_result(&thread).is_err());
-
-        let mut buffered = [0; 4096];
-        read.read_exact(&mut buffered).unwrap();
-        assert_eq!(buffered, [b'x'; 4096]);
-        // SAFETY: the read handle is live. Peek cannot block if a writer leaked.
-        let error =
-            unsafe { PeekNamedPipe(HANDLE(read.as_raw_handle()), None, 0, None, None, None) }
-                .unwrap_err();
-        assert_eq!(error.code(), ERROR_BROKEN_PIPE.to_hresult());
-    }
-
-    #[test]
-    fn stopped_warning_thread_does_not_start_a_write() {
-        use std::io::Read;
-
-        let (mut read, write) = warning_test_pipe();
-        let thread = start_truncation_warning(TruncationWarningParams {
-            stderr: write,
-            stopped: Arc::new(AtomicBool::new(true)),
-        })
-        .unwrap();
-        assert!(warning_thread_result(&thread).is_err());
-        let mut output = String::new();
-        read.read_to_string(&mut output).unwrap();
-        assert!(output.is_empty());
-    }
 
     // ====== Wire-format constants ======
 

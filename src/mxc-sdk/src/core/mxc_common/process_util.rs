@@ -146,8 +146,8 @@ unsafe impl Sync for CancelablePipe {}
 /// at a time (any number of cancellers may fire concurrently).
 ///
 /// Cancelling can discard data that a read has received but has not yet returned
-/// to the caller. When collecting remaining output, cancel only after the
-/// timeout, and warn that some output may be missing.
+/// to the caller. When collecting remaining output, allow it to drain before
+/// cancelling at the timeout.
 pub struct InterruptiblePipeReader(Arc<CancelablePipe>);
 
 impl InterruptiblePipeReader {

@@ -33,10 +33,6 @@ use windows::Win32::System::Threading::{
 const BUFFER_SIZE: u32 = 4096;
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-pub(super) const OUTPUT_RELAY_TRUNCATION_WARNING: &str =
-    "Warning: isolation session output may be truncated because output draining reached its idle \
-     or overall time limit before EOF; a descendant may still be holding the output pipe open";
-
 pub(super) fn duplicate_handle(handle: HANDLE) -> Result<OwnedHandle, WxcError> {
     let mut duplicated = HANDLE::default();
     unsafe {
@@ -192,7 +188,6 @@ pub(super) fn drain_output_relays_within(
     relays: &[&PipeRelay],
     idle_window: Duration,
     absolute_cap: Duration,
-    on_give_up: impl FnOnce(&str),
 ) -> OutputRelayDrain {
     if relays.is_empty() || relays.iter().all(|relay| relay_is_finished(relay)) {
         return OutputRelayDrain::Drained;
@@ -220,7 +215,6 @@ pub(super) fn drain_output_relays_within(
             for relay in relays {
                 relay.cancel_read();
             }
-            on_give_up(OUTPUT_RELAY_TRUNCATION_WARNING);
             return OutputRelayDrain::GaveUp;
         }
 
@@ -736,12 +730,10 @@ mod tests {
         });
 
         let started = std::time::Instant::now();
-        let mut warnings = Vec::new();
         let result = drain_output_relays_within(
             &[&relay],
             std::time::Duration::from_millis(100),
             std::time::Duration::from_secs(2),
-            |warning| warnings.push(warning.to_string()),
         );
         let elapsed = started.elapsed();
 
@@ -750,7 +742,6 @@ mod tests {
         let output = reader.join().unwrap();
 
         assert_eq!(result, OutputRelayDrain::Drained);
-        assert!(warnings.is_empty(), "a progressing relay must not warn");
         assert!(
             elapsed >= std::time::Duration::from_millis(120),
             "the drain returned before the slow producer finished: {elapsed:?}"
@@ -767,13 +758,10 @@ mod tests {
         drop(dest_write);
 
         let started = std::time::Instant::now();
-        let mut logger =
-            crate::mxc_common::logger::Logger::new(crate::mxc_common::logger::Mode::Buffer);
         let result = drain_output_relays_within(
             &[&relay],
             std::time::Duration::from_millis(30),
             std::time::Duration::from_millis(500),
-            |warning| logger.warning_line(warning),
         );
         let elapsed = started.elapsed();
 
@@ -782,7 +770,6 @@ mod tests {
             elapsed < std::time::Duration::from_secs(2),
             "the drain must be bounded, took {elapsed:?}"
         );
-        assert_eq!(logger.take_warnings(), [OUTPUT_RELAY_TRUNCATION_WARNING]);
 
         assert_eq!(
             unsafe { WaitForSingleObject(relay.thread().get(), 5000) },
@@ -846,11 +833,7 @@ mod tests {
 
         let cap = Duration::from_millis(600);
         let started = Instant::now();
-        let mut warnings = Vec::new();
-        let result =
-            drain_output_relays_within(&[&relay], Duration::from_millis(300), cap, |warning| {
-                warnings.push(warning.to_string())
-            });
+        let result = drain_output_relays_within(&[&relay], Duration::from_millis(300), cap);
         let elapsed = started.elapsed();
         assert_eq!(
             unsafe { WaitForSingleObject(relay.thread().get(), 5000) },
@@ -868,7 +851,6 @@ mod tests {
             elapsed < Duration::from_millis(1600),
             "cap was exceeded: {elapsed:?}"
         );
-        assert_eq!(warnings, [OUTPUT_RELAY_TRUNCATION_WARNING]);
         assert!(output.len() >= 12 && output.len() < 200 * 6);
         assert_eq!(output, "chunk\n".repeat(output.len() / 6));
         assert_eq!(relay.progress_bytes(), output.len() as u64);

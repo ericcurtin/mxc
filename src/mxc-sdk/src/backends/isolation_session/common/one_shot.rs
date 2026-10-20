@@ -122,7 +122,7 @@ impl ScriptRunner for IsolationSessionRunner {
         }
 
         let exit_code = match manager.create_process(&options, Some(logger)) {
-            Ok(result) => result.exit_code,
+            Ok(code) => code,
             Err(e) => {
                 let stopped = manager.stop_session().is_ok();
                 let deprovisioned = manager.deprovision_agent_user().is_ok();

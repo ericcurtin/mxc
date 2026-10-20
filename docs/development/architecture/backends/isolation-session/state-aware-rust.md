@@ -428,16 +428,14 @@ copies remaining stdout and stderr until both finish, neither successfully
 writes output for five seconds, or 60 seconds pass, whichever comes first.
 These limits do not apply to SDK `Piped` execution.
 
-On timeout, MXC cancels reads, warns that output may be missing, and briefly
-waits for the copying threads to exit. Cancellation can discard data already
-read, but cannot interrupt blocked writes or flushes. Those threads may keep
-pipe handles open and finish writing after cleanup returns. Descendant
-processes and stdin handling are unchanged.
+On timeout, MXC cancels reads and briefly waits for the copying threads to exit.
+Cancellation can discard data already read, but cannot interrupt blocked writes
+or flushes. Those threads may keep pipe handles open and finish writing after
+cleanup returns. Descendant processes and stdin handling are unchanged.
 
-Lifecycle `Relayed` execution sends warnings to host stderr and configured
-diagnostic output, preserving the workload exit code if warning delivery
-succeeds. Create-and-run execution stores warnings in the caller's logger;
-`wxc-exec` prints them to stderr.
+Reaching the drain limit does not change the workload's exit code or emit a
+truncation warning. The drain fix reduces premature cancellation of progressing
+output; it does not guarantee complete output when a limit is reached.
 
 ### Deprovision and concurrent sandboxes
 

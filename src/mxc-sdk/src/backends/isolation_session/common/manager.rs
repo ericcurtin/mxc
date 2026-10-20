@@ -43,23 +43,6 @@ use super::process_options::{build_iso_process_options, ProcessOptions};
 // The OS account name is lifecycle addressing data, not diagnostic identity.
 const AGENT_IDENTITY_MARKER: &str = "isolation-session-agent";
 
-pub(super) struct RelayedProcessResult {
-    pub exit_code: i32,
-    pub output_may_be_truncated: bool,
-}
-
-impl RelayedProcessResult {
-    fn new(outcome: ExecOutcome, output_drain: OutputRelayDrain) -> Self {
-        Self {
-            exit_code: match outcome {
-                ExecOutcome::Exited(exit_code) => exit_code,
-                ExecOutcome::TimedOut => WAIT_FOR_EXIT_TIMEOUT,
-            },
-            output_may_be_truncated: output_drain == OutputRelayDrain::GaveUp,
-        }
-    }
-}
-
 /// Keeps the process's MTA alive for as long as the lifecycle's WinRT objects,
 /// which outlive the call that created them.
 /// `CoIncrementMTAUsage` holds a reference releasable from any thread;
@@ -416,8 +399,7 @@ impl IsolationSessionManager {
 
     /// Step 3: Create a process inside the started isolation session and run it
     /// to completion. Output is streamed live to the calling process's stdio via
-    /// internal relay threads; returns the exit code and whether output draining
-    /// stopped before EOF.
+    /// internal relay threads; only the exit code is returned.
     ///
     /// This is the **relay** path, reached by `wxc-exec` and by an in-process
     /// caller that asked to attach. A caller that wants the streams handed back
@@ -426,7 +408,7 @@ impl IsolationSessionManager {
         &self,
         options: &ProcessOptions,
         logger: Option<&mut Logger>,
-    ) -> Result<RelayedProcessResult, IsolationSessionError> {
+    ) -> Result<i32, IsolationSessionError> {
         owned_thread::call(&self.impersonation, || {
             // Everything fallible that does not need the workload runs first, so no
             // failure can strand a running one.
@@ -600,8 +582,12 @@ impl IsolationSessionManager {
 
             let outcome = started.wait(options.timeout_ms)?;
             scope.stop_stdin();
-            let output_drain = scope.finish(logger);
-            Ok(RelayedProcessResult::new(outcome, output_drain))
+            scope.finish();
+
+            Ok(match outcome {
+                ExecOutcome::Exited(exit_code) => exit_code,
+                ExecOutcome::TimedOut => WAIT_FOR_EXIT_TIMEOUT,
+            })
         })
     }
 
@@ -1105,18 +1091,13 @@ impl<'a> RelayScope<'a> {
     }
 
     /// Teardown for a workload that has already exited.
-    fn finish(&mut self, mut logger: Option<&mut Logger>) -> OutputRelayDrain {
+    fn finish(&mut self) {
         self.signal_stop();
         let output_relays = self.output_relays();
         let output_drain = drain_output_relays_within(
             &output_relays,
             Duration::from_millis(Self::IDLE_MS),
             Duration::from_millis(Self::ABSOLUTE_CAP_MS),
-            |warning| {
-                if let Some(logger) = &mut logger {
-                    logger.warning_line(warning);
-                }
-            },
         );
         if output_drain == OutputRelayDrain::GaveUp {
             Self::join_output(&self.stdout, Self::JOIN_MS);
@@ -1125,7 +1106,6 @@ impl<'a> RelayScope<'a> {
         Self::join(self.stdin.as_ref(), Self::JOIN_MS);
         self.close_handles();
         self.finished = true;
-        output_drain
     }
 }
 
@@ -1378,23 +1358,6 @@ fn wait_with_graceful_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn relayed_result_reports_drain_status_without_changing_exit_code() {
-        for (drain, truncated) in [
-            (OutputRelayDrain::Drained, false),
-            (OutputRelayDrain::GaveUp, true),
-        ] {
-            for exit_code in [0, 42, -1] {
-                let result = RelayedProcessResult::new(ExecOutcome::Exited(exit_code), drain);
-                assert_eq!(result.exit_code, exit_code);
-                assert_eq!(result.output_may_be_truncated, truncated);
-            }
-            let result = RelayedProcessResult::new(ExecOutcome::TimedOut, drain);
-            assert_eq!(result.exit_code, WAIT_FOR_EXIT_TIMEOUT);
-            assert_eq!(result.output_may_be_truncated, truncated);
-        }
-    }
 
     #[test]
     fn bounded_termination_requires_confirmation_after_a_timeout_sentinel() {
