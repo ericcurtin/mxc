@@ -121,6 +121,22 @@ mod windows_x64 {
             ("preserve", json!({"lifecycle": {"preservePolicy": true}})),
             ("timeout-limit", json!({"process": {"timeout": 3_600_001}})),
             ("parent-cwd", json!({"process": {"cwd": "/tmp/../escape"}})),
+            (
+                "parent-cwd-unc-share",
+                json!({"process": {"cwd": "//tmp/../escape"}}),
+            ),
+            (
+                "parent-cwd-unc-end",
+                json!({"process": {"cwd": "//tmp/.."}}),
+            ),
+            (
+                "parent-cwd-unc-server",
+                json!({"process": {"cwd": "//../tmp"}}),
+            ),
+            (
+                "parent-cwd-triple-slash",
+                json!({"process": {"cwd": "///tmp/../escape"}}),
+            ),
             ("relative-cwd", json!({"process": {"cwd": "relative"}})),
             (
                 "replacement-env",
@@ -147,6 +163,10 @@ mod windows_x64 {
 
     fn capability_requests() -> Vec<(&'static str, Value)> {
         vec![
+            (
+                "safe-cwd-double-slash",
+                json!({"process": {"cwd": "//tmp/work"}}),
+            ),
             (
                 "readonly",
                 json!({"filesystem": {"readonlyPaths": ["C:\\work"]}}),
@@ -242,6 +262,18 @@ mod windows_x64 {
                 assert_eq!(error.message, MIXED_BACKEND_ERROR, "{label}");
             } else if label == "fallback" {
                 assert_eq!(error.code, ErrorCode::PolicyValidation);
+            } else if label.starts_with("parent-cwd") {
+                assert_eq!(error.code, ErrorCode::PolicyValidation, "{label}");
+                assert_eq!(
+                    error.message, "NVX process.cwd must not contain '..' path components",
+                    "{label}"
+                );
+            } else if label == "relative-cwd" {
+                assert_eq!(error.code, ErrorCode::PolicyValidation);
+                assert_eq!(
+                    error.message,
+                    "NVX process.cwd must be an absolute POSIX guest path"
+                );
             }
             println!(
                 "HOST_ONLY rejected {label}: {:?}: {}",

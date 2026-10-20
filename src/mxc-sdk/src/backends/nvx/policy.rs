@@ -150,6 +150,10 @@ pub(super) fn validate_request(request: &ExecutionRequest) -> Result<(), MxcErro
     if std::path::Path::new(&request.working_directory)
         .components()
         .any(|component| component == Component::ParentDir)
+        || request
+            .working_directory
+            .split('/')
+            .any(|segment| segment == "..")
     {
         return Err(MxcError::policy_validation(
             "NVX process.cwd must not contain '..' path components",
@@ -728,6 +732,62 @@ mod tests {
         assert_eq!(
             validate_request(&request).unwrap_err().code,
             crate::mxc_common::mxc_error::MxcErrorCode::MalformedRequest
+        );
+    }
+
+    #[test]
+    fn guest_cwd_parent_segments_are_rejected_and_safe_paths_forwarded_verbatim() {
+        use crate::mxc_common::mxc_error::MxcErrorCode;
+        for cwd in [
+            "//tmp/../escape",
+            "//tmp/..",
+            "//../tmp",
+            "///tmp/../escape",
+            "/work/../escape",
+            r"/work\..\escape",
+            r"C:\work\..\escape",
+        ] {
+            let mut request = request();
+            request.working_directory = cwd.to_owned();
+            for error in [
+                validate_request(&request).unwrap_err(),
+                exec_request(&request, false, &capabilities()).unwrap_err(),
+            ] {
+                assert_eq!(error.code, MxcErrorCode::PolicyValidation, "{cwd}");
+                assert_eq!(
+                    error.message, "NVX process.cwd must not contain '..' path components",
+                    "{cwd}"
+                );
+            }
+        }
+        for cwd in ["//tmp/work", "/tmp/./work", "/tmp/name..txt", "", "/"] {
+            let mut request = request();
+            request.working_directory = cwd.to_owned();
+            validate_request(&request).unwrap();
+            let exec = exec_request(&request, false, &capabilities()).unwrap();
+            assert_eq!(
+                exec.process.cwd.as_deref(),
+                (!cwd.is_empty()).then_some(cwd),
+                "{cwd}"
+            );
+        }
+        for cwd in ["relative", r"C:\work"] {
+            let mut request = request();
+            request.working_directory = cwd.to_owned();
+            let error = validate_request(&request).unwrap_err();
+            assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+            assert_eq!(
+                error.message,
+                "NVX process.cwd must be an absolute POSIX guest path"
+            );
+        }
+        let mut request = request();
+        request.working_directory = "//tmp/../escape\0".to_owned();
+        let error = validate_request(&request).unwrap_err();
+        assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+        assert_eq!(
+            error.message,
+            "NVX process.commandLine and process.cwd must not contain null bytes"
         );
     }
 }
