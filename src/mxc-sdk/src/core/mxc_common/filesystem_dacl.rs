@@ -1380,7 +1380,7 @@ mod owner_only_directory_creation {
             unsafe {
                 ConvertStringSecurityDescriptorToSecurityDescriptorW(
                     PCWSTR(sddl_w.as_mut_ptr()),
-                    SDDL_REVISION_1 as u32,
+                    SDDL_REVISION_1,
                     &mut descriptor,
                     None,
                 )
