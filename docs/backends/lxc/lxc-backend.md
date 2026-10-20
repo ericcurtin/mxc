@@ -64,13 +64,7 @@ sudo firewall-cmd --zone=<ZONE> --change-interface=lxcbr0
 
 ## Workload privileges
 
-MXC drops `CAP_SYS_ADMIN` using LXC's native configuration.  In an ordinary
-launch, mount administration in the container's original user namespace is
-unavailable, including remounting `/proc/sys` read-write.
-
-MXC does not clear or check inherited `CAP_SYS_ADMIN`.  A caller that
-deliberately supplies it, for example through `capsh`, can retain that
-authority in the workload.
+MXC drops `CAP_SYS_ADMIN` using LXC's native configuration.
 
 This does not change the workload's user ID or configure an unprivileged
 container.  Ordinary writes to writable files still work.
