@@ -124,7 +124,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
                 &normalized
             }
             Ok(None) => request,
-            Err(msg) => return Err(ScriptResponse::rejected(&msg)),
+            Err(error) => return Err(error.into_response()),
         };
         // Reject any policy path the invoking user cannot access, so the sandbox
         // never gains access the caller lacks. Runs after object normalization

@@ -454,7 +454,7 @@ impl LxcScriptRunner {
                 &normalized
             }
             Ok(None) => request,
-            Err(msg) => return Err(ScriptResponse::rejected(&msg)),
+            Err(error) => return Err(error.into_response()),
         };
         if let Err(msg) = crate::mxc_common::filesystem_access::check_delegation(&request.policy) {
             return Err(ScriptResponse::rejected(&msg));
