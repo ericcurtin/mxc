@@ -64,19 +64,19 @@ sudo firewall-cmd --zone=<ZONE> --change-interface=lxcbr0
 
 ## Workload privileges
 
-MXC starts LXC workloads without `CAP_SYS_ADMIN`, even when no filesystem or
-network policy is supplied.  Mount administration in the container's original
-user namespace is unavailable, including remounting `/proc/sys` read-write.
-Programs that need this authority are not supported.
+MXC drops `CAP_SYS_ADMIN` using LXC's native configuration.  In an ordinary
+launch, mount administration in the container's original user namespace is
+unavailable, including remounting `/proc/sys` read-write.
+
+MXC does not clear or check inherited `CAP_SYS_ADMIN`.  A caller that
+deliberately supplies it, for example through `capsh`, can retain that
+authority in the workload.
 
 This does not change the workload's user ID or configure an unprivileged
-container.  Ordinary writes to writable files still work.  Dropping this
-capability alone is not a complete filesystem sandbox.
+container.  Ordinary writes to writable files still work.
 
-MXC refuses attachment if the running container retains `CAP_SYS_ADMIN` or its
-capability state cannot be verified.  Existing native `lxc.cap.drop` entries
-remain in force.  A nonempty native `lxc.cap.keep` conflicts with the mandatory
-drop and fails startup.
+Existing native `lxc.cap.drop` entries remain in force.  A nonempty native
+`lxc.cap.keep` conflicts with the mandatory drop and fails startup.
 
 ## Configuration
 

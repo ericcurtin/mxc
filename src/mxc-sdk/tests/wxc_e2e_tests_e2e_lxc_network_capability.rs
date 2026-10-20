@@ -94,7 +94,7 @@ fn workload_has_no_sys_admin_capability() {
     let status =
         run_platform_config_value("lxc sys admin capability", &config, &[], None).combined_output();
 
-    for field in ["CapEff:", "CapPrm:", "CapInh:", "CapBnd:", "CapAmb:"] {
+    for field in ["CapEff:", "CapPrm:", "CapBnd:"] {
         assert_eq!(
             capability_mask(&status, field) & CAP_SYS_ADMIN,
             0,

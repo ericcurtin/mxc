@@ -593,7 +593,7 @@ impl LxcScriptRunner {
             Err(e) => {
                 self.release_after_failure(&container, container_created, logger);
                 return Err(ScriptResponse::error(&format!(
-                    "Failed to verify container capability restrictions: {e}"
+                    "Failed to inspect container init PID: {e}"
                 )));
             }
         };
