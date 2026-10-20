@@ -41,22 +41,27 @@ function Invoke-MicroVmPhase {
             "--config-base64", $base64
         )
     }
+    $stdout = [IO.Path]::GetTempFileName()
     $stderr = [IO.Path]::GetTempFileName()
     try {
-        $stdout = & $WxcExePath @arguments 2>$stderr
+        # Native stderr becomes a terminating error under Windows PowerShell 5.1.
+        # Redirect at the process boundary so phase handling retains both streams.
+        $process = Start-Process -FilePath $WxcExePath -ArgumentList $arguments `
+            -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
         @{
-            ExitCode = $LASTEXITCODE
-            Stdout = ($stdout -join "`n")
-            Stderr = (Get-Content $stderr -Raw -ErrorAction SilentlyContinue)
+            ExitCode = $process.ExitCode
+            Stdout = [IO.File]::ReadAllText($stdout)
+            Stderr = [IO.File]::ReadAllText($stderr)
         }
     } finally {
+        Remove-Item $stdout -Force -ErrorAction SilentlyContinue
         Remove-Item $stderr -Force -ErrorAction SilentlyContinue
     }
 }
 
 $provision = Invoke-MicroVmPhase -Phase "provision" -Payload $ProvisionPayload
 if ($provision.ExitCode -ne 0) {
-    throw "provision failed: $($provision.Stderr)"
+    throw "provision failed: exit=$($provision.ExitCode) stdout=$($provision.Stdout) stderr=$($provision.Stderr)"
 }
 $sandboxId = ($provision.Stdout | ConvertFrom-Json).result.sandboxId
 if ($sandboxId -notlike "microvm:*") {
@@ -68,7 +73,7 @@ try {
         version = "1.1.0-alpha"
     }
     if ($start.ExitCode -ne 0) {
-        throw "start failed: $($start.Stderr)"
+        throw "start failed: exit=$($start.ExitCode) stdout=$($start.Stdout) stderr=$($start.Stderr)"
     }
 
     $exec = Invoke-MicroVmPhase -Phase "exec" -SandboxId $sandboxId -Payload @{
@@ -83,14 +88,14 @@ try {
         version = "1.1.0-alpha"
     }
     if ($stop.ExitCode -ne 0) {
-        throw "stop failed: $($stop.Stderr)"
+        throw "stop failed: exit=$($stop.ExitCode) stdout=$($stop.Stdout) stderr=$($stop.Stderr)"
     }
 } finally {
     $deprovision = Invoke-MicroVmPhase -Phase "deprovision" -SandboxId $sandboxId -Payload @{
         version = "1.1.0-alpha"
     }
     if ($deprovision.ExitCode -ne 0) {
-        throw "deprovision failed: $($deprovision.Stderr)"
+        throw "deprovision failed: exit=$($deprovision.ExitCode) stdout=$($deprovision.Stdout) stderr=$($deprovision.Stderr)"
     }
 }
 

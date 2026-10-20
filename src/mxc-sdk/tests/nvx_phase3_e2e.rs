@@ -198,6 +198,113 @@ fn powershell_authored_lifecycle_payload_parses_without_executing_the_cli() {
 }
 
 #[test]
+fn powershell_lifecycle_failures_report_both_streams_and_preserve_cleanup() {
+    use std::io::{Seek, SeekFrom};
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(r"..\..\tests\scripts\run_microvm_state_aware_tests.ps1");
+    let root = tempfile::Builder::new()
+        .prefix("nvx host fixture ")
+        .tempdir()
+        .unwrap();
+    let executor = root.path().join("fake-executor.cmd");
+    std::fs::write(
+        &executor,
+        r#"@echo off
+        echo %2>>"%MXC_NVX_PHASE_EVENTS%"
+        if "%2"=="%MXC_NVX_FAIL_PHASE%" (
+          echo {"error":{"code":"BackendError","message":"STDOUT_%2_JSON_ERROR"}}
+          echo STDERR_%2_MARKER 1>&2
+          exit /b 23
+        )
+        if "%2"=="provision" (
+          echo {"result":{"sandboxId":"microvm:fake-host-only"}}
+        ) else if "%2"=="exec" (
+          echo EXECUTOR_NVX_OK
+        ) else (
+          echo {"result":{}}
+        )
+        exit /b 0
+        "#,
+    )
+    .unwrap();
+    for (failure, expected) in [
+        ("provision", vec!["provision"]),
+        ("start", vec!["provision", "start", "deprovision"]),
+        ("exec", vec!["provision", "start", "exec", "deprovision"]),
+        (
+            "stop",
+            vec!["provision", "start", "exec", "stop", "deprovision"],
+        ),
+        (
+            "deprovision",
+            vec!["provision", "start", "exec", "stop", "deprovision"],
+        ),
+        (
+            "none",
+            vec!["provision", "start", "exec", "stop", "deprovision"],
+        ),
+    ] {
+        let events = root.path().join(format!("{failure}-events.txt"));
+        let mut stdout = tempfile::tempfile().unwrap();
+        let mut stderr = tempfile::tempfile().unwrap();
+        let mut child = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&script)
+            .arg("-WxcExePath")
+            .arg(&executor)
+            .env("MXC_NVX_FAIL_PHASE", failure)
+            .env("MXC_NVX_PHASE_EVENTS", &events)
+            .stdin(std::process::Stdio::null())
+            .stdout(stdout.try_clone().unwrap())
+            .stderr(stderr.try_clone().unwrap())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("fake executor {failure} exceeded deadline");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        stdout.seek(SeekFrom::Start(0)).unwrap();
+        stderr.seek(SeekFrom::Start(0)).unwrap();
+        let mut out = String::new();
+        let mut err = String::new();
+        stdout.read_to_string(&mut out).unwrap();
+        stderr.read_to_string(&mut err).unwrap();
+        let actual = std::fs::read_to_string(events).unwrap();
+        assert_eq!(
+            actual.lines().collect::<Vec<_>>(),
+            expected,
+            "{failure}: {err}"
+        );
+        if failure == "none" {
+            assert!(status.success(), "{out}\n{err}");
+            assert!(out.contains("MicroVM state-aware executor E2E passed: microvm:fake-host-only"));
+        } else {
+            assert!(!status.success(), "{failure}");
+            for required in [
+                format!("{failure} failed: exit=23"),
+                format!("STDOUT_{failure}_JSON_ERROR"),
+                format!("STDERR_{failure}_MARKER"),
+            ] {
+                assert!(err.contains(&required), "missing {required}: {out}\n{err}");
+            }
+        }
+    }
+}
+#[test]
 fn microvm_sample_creation_corpus_parses_with_explicit_images() {
     use mxc_sdk::mxc_common::{
         config_parser::load_mxc_request_from_json,
