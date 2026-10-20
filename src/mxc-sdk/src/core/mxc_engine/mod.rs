@@ -153,6 +153,14 @@ pub(crate) fn execute_one_shot_json(
     let mut logger = Logger::new(Mode::Buffer);
     let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
 
+    execute_one_shot_request(&request, logger)
+}
+
+pub(crate) fn execute_one_shot_request(
+    request: &ExecutionRequest,
+    logger: Logger,
+) -> Result<OneShotExecution, Error> {
+    experimental::require_experimental_optin(&request.containment, request.experimental_enabled)?;
     if request.containment == ContainmentBackend::MicroVm {
         #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
         {
