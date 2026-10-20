@@ -149,9 +149,3 @@ Resolve questions that affect the design before approval.
 - [ ] Delivery and documentation changes are scoped; material questions are resolved.
 - [ ] Answers are concise; diagrams explain the design without repeating the text.
 - [ ] Maintainers have approved the spec and its status is Accepted before merge.
-
-## Further reading
-
-- [Rust RFC template](https://github.com/rust-lang/rfcs/blob/main/0000-template.md)
-- [Kubernetes enhancement template](https://github.com/kubernetes/enhancements/blob/master/keps/NNNN-kep-template/README.md)
-- [.NET API review process](https://github.com/dotnet/runtime/blob/main/docs/project/api-review-process.md)
