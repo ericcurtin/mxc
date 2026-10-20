@@ -14,7 +14,7 @@ Attached execution is not exposed by the V1 SDK.
 Experimental Windows x64 MicroVM captured execution uses
 `v1::experimental::run(request: ContainerRequest, options: RunOptions) -> Result<ExecutionResult, Error>`.
 It requires the `microvm` build feature and
-`Containment::MicroVm { image: String }`. Stable operations do not authorize
+`Containment::MicroVm { image: String, memory_mib: Option<u32> }`. Stable operations do not authorize
 MicroVM. Live execution uses `v1::experimental::spawn`, and container lifecycle
 operations use `v1::experimental::container`, as described below.
 
@@ -40,10 +40,24 @@ that waits first without reading can block indefinitely.
 
 NVX MicroVM uses the ordinary V1 request, process, result, and options types
 through explicit experimental entry points:
-Creation selects `Containment::MicroVm { image: String }`; provision uses
+Creation selects `Containment::MicroVm { image: String, memory_mib: Option<u32> }`; provision uses
 `ProvisionRequest::microvm(image, memory_mib)`. Both require a registry image
 reference. Provision fixes the image for the container, and execution in an
-existing container cannot select another image.
+existing container cannot select another image or memory size. On either creation
+path, `None` leaves memory unspecified and `Some(512)` requests 512 MiB.
+This experimental backend is exposed by Rust only; the .NET and Node V1
+APIs do not add MicroVM selection.
+
+```rust
+let default_creation = Containment::MicroVm {
+    image: "python:3.12-alpine".to_owned(), memory_mib: None,
+};
+let sized_creation = Containment::MicroVm {
+    image: "python:3.12-alpine".to_owned(), memory_mib: Some(512),
+};
+let default_provision = ProvisionRequest::microvm("python:3.12-alpine", None);
+let sized_provision = ProvisionRequest::microvm("python:3.12-alpine", Some(512));
+```
 
 ```rust
 pub fn mxc_sdk::v1::experimental::spawn(

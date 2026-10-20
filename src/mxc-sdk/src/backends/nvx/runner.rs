@@ -734,6 +734,7 @@ mod tests {
             "env",
             "timeout",
             "validate_exec",
+            "memory",
         ] {
             let mut request = streaming_request();
             let mut capabilities = Fixture::supported_capabilities();
@@ -761,6 +762,11 @@ mod tests {
                     capabilities.exec.max_timeout_ms = Some(500);
                     "NVX process.timeout must not exceed 500 ms"
                 }
+                "memory" => {
+                    request.microvm_memory_mib = Some(512);
+                    capabilities.spec.memory = false;
+                    "the configured NVX runtime does not support microvm.provision.memoryMib"
+                }
                 "validate_exec" => {
                     fixture.fail = Some("validate_exec");
                     "injected validate_exec failure"
@@ -771,6 +777,9 @@ mod tests {
             let (result, root) = injected_launch(&request, &fixture, false);
             let error = result.err().expect("admission must refuse the launch");
             assert!(error.message.contains(expected), "{refusal}: {error}");
+            if refusal == "memory" {
+                assert_eq!(error.message, expected);
+            }
             assert_eq!(
                 error.code,
                 if refusal == "validate_exec" {
@@ -789,6 +798,23 @@ mod tests {
                 "admission failure must release temporary state"
             );
         }
+    }
+
+    #[test]
+    fn streaming_zero_memory_is_rejected_before_client_creation() {
+        let mut request = streaming_request();
+        request.microvm_memory_mib = Some(0);
+        let error = spawn_streaming_with(
+            &request,
+            |_| panic!("zero memory must not create a client"),
+            |_| panic!("zero memory must not execute or adapt"),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+        assert!(error
+            .message
+            .ends_with("microvm.provision.memoryMib must be greater than zero"));
     }
 
     #[test]

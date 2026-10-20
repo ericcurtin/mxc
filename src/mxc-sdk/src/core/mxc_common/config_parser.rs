@@ -1276,6 +1276,7 @@ fn normalize_common_request_ir(
     require_process: bool,
 ) -> Result<ExecutionRequest, WxcError> {
     let _ignored_metadata = (&cfg.schema, &cfg.comment);
+    crate::mxc_common::models::MicroVmProvisionConfig::validate_memory_mib(cfg.microvm_memory_mib)?;
 
     // `phase` / `sandboxId` are state-aware-only fields. The state-aware path
     // consumes them before delegating here, so if either is still present the
@@ -1630,6 +1631,7 @@ fn normalize_common_request_ir(
         windows_sandbox,
         hyperlight,
         microvm_image: cfg.microvm_image,
+        microvm_memory_mib: cfg.microvm_memory_mib,
         experimental_enabled: false,
         dry_run: false,
     })

@@ -263,11 +263,11 @@ export interface Lxc {
 export type MicroVmContainment = "microvm";
 
 /**
- * MicroVM settings accepted during provisioning.
+ * MicroVM creation settings shared by create-and-run and provision requests.
  */
 export interface MicroVmProvision {
   /**
-   * Guest memory in MiB. Zero is rejected by backend semantic validation.
+   * Guest memory in MiB. Zero is rejected by semantic validation.
    */
   memoryMib?: number;
 }
@@ -406,6 +406,10 @@ export interface OneShotMicroVm {
    * Registry image reference resolved by the signed NVX agent.
    */
   image: ImageReference;
+  /**
+   * Optional settings applied when creating the MicroVM.
+   */
+  provision?: MicroVmProvision;
 }
 
 /**

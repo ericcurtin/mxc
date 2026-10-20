@@ -28,20 +28,23 @@ fn microvm_creation_rejects_missing_and_blank_images_before_runtime() {
 
 #[test]
 fn microvm_typed_stable_run_and_spawn_require_optin() {
-    for spawn in [false, true] {
-        let mut request = mxc_sdk::v1::ContainerRequest::new("printf forbidden");
-        request.containment = mxc_sdk::v1::Containment::MicroVm {
-            image: "python:3.12-alpine".to_owned(),
-        };
-        let error = if spawn {
-            mxc_sdk::v1::spawn(request, Default::default())
-                .err()
-                .expect("stable spawn must reject MicroVM")
-        } else {
-            mxc_sdk::v1::run(request, Default::default()).unwrap_err()
-        };
-        assert_eq!(error.code, ErrorCode::BackendUnavailable, "{error}");
-        assert!(error.message.contains("experimental"), "{error}");
+    for memory_mib in [None, Some(512)] {
+        for spawn in [false, true] {
+            let mut request = mxc_sdk::v1::ContainerRequest::new("printf forbidden");
+            request.containment = mxc_sdk::v1::Containment::MicroVm {
+                image: "python:3.12-alpine".to_owned(),
+                memory_mib,
+            };
+            let error = if spawn {
+                mxc_sdk::v1::spawn(request, Default::default())
+                    .err()
+                    .expect("stable spawn must reject MicroVM")
+            } else {
+                mxc_sdk::v1::run(request, Default::default()).unwrap_err()
+            };
+            assert_eq!(error.code, ErrorCode::BackendUnavailable, "{error}");
+            assert!(error.message.contains("experimental"), "{error}");
+        }
     }
 }
 
@@ -50,6 +53,7 @@ fn microvm_experimental_typed_run_rejects_blank_image_before_runtime() {
     let mut request = mxc_sdk::v1::ContainerRequest::new("printf forbidden");
     request.containment = mxc_sdk::v1::Containment::MicroVm {
         image: " ".to_owned(),
+        memory_mib: None,
     };
     let error = mxc_sdk::v1::experimental::run(request, Default::default()).unwrap_err();
     assert_eq!(error.code, ErrorCode::MalformedRequest, "{error}");
@@ -297,6 +301,119 @@ mod windows_x64 {
                 error.message
             );
         }
+
+        for provision in [None, Some(json!({})), Some(json!({"memoryMib":512}))] {
+            for lifecycle in [false, true] {
+                let mut request = process_only_request("printf forbidden");
+                if let Some(provision) = &provision {
+                    request["microvm"]["provision"] = provision.clone();
+                }
+                if lifecycle {
+                    request.as_object_mut().unwrap().remove("process");
+                    request["phase"] = json!("provision");
+                }
+                let error = if lifecycle {
+                    mxc_sdk::__ffi::run_lifecycle_json(&request.to_string(), false, true)
+                        .unwrap_err()
+                } else {
+                    mxc_sdk::__ffi::run_json(&request.to_string(), true).unwrap_err()
+                };
+                assert_eq!(
+                    error.code,
+                    ErrorCode::BackendUnavailable,
+                    "{request}: {error}"
+                );
+                assert!(error.message.contains("NVX"));
+            }
+        }
+        for invalid in [json!(0), json!(null), json!(-1), json!("512"), json!(true)] {
+            for lifecycle in [false, true] {
+                let mut request = process_only_request("printf forbidden");
+                request["microvm"]["provision"] = json!({"memoryMib":invalid});
+                if lifecycle {
+                    request.as_object_mut().unwrap().remove("process");
+                    request["phase"] = json!("provision");
+                }
+                let error = if lifecycle {
+                    mxc_sdk::__ffi::run_lifecycle_json(&request.to_string(), false, true)
+                        .unwrap_err()
+                } else {
+                    mxc_sdk::__ffi::run_json(&request.to_string(), true).unwrap_err()
+                };
+                assert_eq!(
+                    error.code,
+                    ErrorCode::MalformedRequest,
+                    "{request}: {error}"
+                );
+                assert!(error.message.contains("memoryMib"), "{error}");
+                if invalid == json!(0) {
+                    assert!(
+                        error.message.contains("must be greater than zero"),
+                        "{error}"
+                    );
+                }
+            }
+        }
+        for lifecycle in [false, true] {
+            let mut request = process_only_request("printf forbidden");
+            request["microvm"]["provision"] = json!(null);
+            if lifecycle {
+                request.as_object_mut().unwrap().remove("process");
+                request["phase"] = json!("provision");
+            }
+            let error = if lifecycle {
+                mxc_sdk::__ffi::run_lifecycle_json(&request.to_string(), false, true).unwrap_err()
+            } else {
+                mxc_sdk::__ffi::run_json(&request.to_string(), true).unwrap_err()
+            };
+            assert_eq!(error.code, ErrorCode::MalformedRequest);
+        }
+        for memory_mib in [None, Some(512)] {
+            let mut typed = mxc_sdk::v1::ContainerRequest::new("printf forbidden");
+            typed.containment = mxc_sdk::v1::Containment::MicroVm {
+                image: "python:3.12-alpine".to_owned(),
+                memory_mib,
+            };
+            let error = mxc_sdk::v1::experimental::run(typed, Default::default()).unwrap_err();
+            assert_eq!(error.code, ErrorCode::BackendUnavailable);
+            let error = mxc_sdk::v1::experimental::container::provision_container(
+                mxc_sdk::v1::ProvisionRequest::microvm("python:3.12-alpine", memory_mib),
+                Default::default(),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, ErrorCode::BackendUnavailable);
+        }
+        let mut typed = mxc_sdk::v1::ContainerRequest::new("printf forbidden");
+        typed.containment = mxc_sdk::v1::Containment::MicroVm {
+            image: "python:3.12-alpine".to_owned(),
+            memory_mib: Some(0),
+        };
+        let error = mxc_sdk::v1::experimental::run(typed, Default::default()).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedRequest);
+        assert!(error
+            .message
+            .contains("memoryMib must be greater than zero"));
+        let error = mxc_sdk::v1::experimental::container::provision_container(
+            mxc_sdk::v1::ProvisionRequest::microvm("python:3.12-alpine", Some(0)),
+            Default::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedRequest);
+        assert!(error
+            .message
+            .contains("memoryMib must be greater than zero"));
+        let error = mxc_sdk::__ffi::execute_lifecycle_json(
+            &json!({
+                "version":"1.1.0-alpha","phase":"exec","sandboxId":"microvm:test",
+                "process":{"commandLine":"printf forbidden"},
+                "microvm":{"image":"python:3.12-alpine","provision":{"memoryMib":512}}
+            })
+            .to_string(),
+            true,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, ErrorCode::MalformedRequest);
 
         let request = process_only_request("printf forbidden").to_string();
         let error = mxc_sdk::__ffi::run_json(&request, true).unwrap_err();

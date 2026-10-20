@@ -466,6 +466,7 @@ fn image_admission_precedes_runtime_setup_for_public_creation_paths() {
         let mut request = ContainerRequest::new("echo should-not-run");
         request.containment = Containment::MicroVm {
             image: image.to_owned(),
+            memory_mib: None,
         };
         let error = v1::experimental::run(request, RunOptions::default()).unwrap_err();
         assert_eq!(error.code, ErrorCode::MalformedRequest);
@@ -474,6 +475,7 @@ fn image_admission_precedes_runtime_setup_for_public_creation_paths() {
         let mut request = ContainerRequest::new("echo should-not-run");
         request.containment = Containment::MicroVm {
             image: image.to_owned(),
+            memory_mib: None,
         };
         let error = v1::experimental::spawn(request, SpawnOptions::default())
             .err()
@@ -875,6 +877,7 @@ fn typed_create_and_run_requires_experimental_and_streams() {
     let mut denied = ContainerRequest::new("printf should-not-run");
     denied.containment = Containment::MicroVm {
         image: "mcr.microsoft.com/azurelinux/base/core:3.0".to_owned(),
+        memory_mib: None,
     };
     let error = v1::run(denied, RunOptions::default()).unwrap_err();
     assert_eq!(error.code, ErrorCode::BackendUnavailable);
@@ -883,6 +886,7 @@ fn typed_create_and_run_requires_experimental_and_streams() {
     let mut request = ContainerRequest::new("cat");
     request.containment = Containment::MicroVm {
         image: "mcr.microsoft.com/azurelinux/base/core:3.0".to_owned(),
+        memory_mib: None,
     };
     let mut process =
         v1::experimental::spawn(request, SpawnOptions::default()).expect("spawn one-shot cat");

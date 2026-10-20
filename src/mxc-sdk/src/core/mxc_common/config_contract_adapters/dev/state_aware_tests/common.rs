@@ -32,6 +32,7 @@ pub(super) fn assert_clean_common(common: &crate::mxc_common::common_request_ir:
     assert!(common.lxc.is_none());
     assert!(common.wslc.is_none());
     assert!(common.microvm_image.is_none());
+    assert!(common.microvm_memory_mib.is_none());
     assert!(common.seatbelt.is_none());
     assert!(common.fallback.is_none());
     assert!(common.ui.is_none());

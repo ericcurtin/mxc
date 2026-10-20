@@ -244,13 +244,26 @@ pub struct IsolationSessionProvisionConfig {
     pub app_id: Option<String>,
 }
 
-/// Runtime-owned state-aware provision config for the MicroVM backend.
+/// Runtime-owned creation config for MicroVM lifecycle provisioning.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MicroVmProvisionConfig {
     /// Registry image fixed at creation.
     pub image: String,
     /// Guest memory in MiB. The backend chooses its default when absent.
     pub memory_mib: Option<u32>,
+}
+
+impl MicroVmProvisionConfig {
+    pub(crate) fn validate_memory_mib(
+        memory_mib: Option<u32>,
+    ) -> Result<(), crate::mxc_common::error::WxcError> {
+        if memory_mib == Some(0) {
+            return Err(crate::mxc_common::error::WxcError::Validation(
+                "microvm.provision.memoryMib must be greater than zero".to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Runtime-owned state-aware provision config for the WSLc backend.
@@ -993,6 +1006,8 @@ pub struct ExecutionRequest {
     pub hyperlight: Option<HyperlightConfig>,
     /// Registry image for MicroVM creation; never supplied for existing-container execution.
     pub microvm_image: Option<String>,
+    /// Explicit MicroVM creation memory; absent leaves the backend default unchanged.
+    pub microvm_memory_mib: Option<u32>,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,
     /// Dry-run mode: validate config and runner setup then return success

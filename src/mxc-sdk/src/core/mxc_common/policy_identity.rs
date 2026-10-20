@@ -230,6 +230,7 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         windows_sandbox,
         hyperlight,
         microvm_image,
+        microvm_memory_mib,
         // Telemetry settings do not affect enforcement.
         telemetry: _excluded_telemetry,
         // A placeholder feature with no enforcement effect.
@@ -251,7 +252,11 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
 
     let mut root = Map::new();
     if let Some(image) = microvm_image {
-        root.insert("microvm".into(), serde_json::json!({"image": image}));
+        let mut config = serde_json::json!({"image": image});
+        if let Some(memory) = microvm_memory_mib {
+            config["provision"] = serde_json::json!({"memoryMib": memory});
+        }
+        root.insert("microvm".into(), config);
     }
 
     root.insert(
@@ -507,6 +512,26 @@ mod tests {
         let mut changed = request();
         changed.source_contract = None;
         assert_eq!(baseline, policy_hash(&changed));
+    }
+
+    #[test]
+    fn creation_memory_is_hashed_at_its_permanent_optional_location() {
+        let mut request = request();
+        request.microvm_image = Some("python:3.12-alpine".to_owned());
+        let absent = policy_projection(&request);
+        assert_eq!(
+            absent["microvm"],
+            serde_json::json!({"image":"python:3.12-alpine"})
+        );
+        request.microvm_memory_mib = Some(512);
+        let explicit = policy_projection(&request);
+        assert_eq!(
+            explicit["microvm"],
+            serde_json::json!({
+                "image":"python:3.12-alpine","provision":{"memoryMib":512}
+            })
+        );
+        assert_ne!(absent, explicit);
     }
 
     #[test]

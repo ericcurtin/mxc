@@ -219,6 +219,7 @@ string_enum! {
 }
 
 mod experimental;
+mod microvm;
 mod network;
 /// The development `1.1.0-alpha` one-shot configuration contract.
 mod one_shot;

@@ -12,15 +12,7 @@ string_marker! {
     pub struct MicroVmContainment => "microvm";
 }
 
-/// MicroVM settings accepted during provisioning.
-#[derive(Debug, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct MicroVmProvision {
-    /// Guest memory in MiB. Zero is rejected by backend semantic validation.
-    #[serde(default)]
-    pub memory_mib: OptionalField<u32>,
-}
+pub use crate::mxc_contract::dev::microvm::MicroVmProvision;
 
 /// State-aware MicroVM settings.
 #[derive(Debug, Deserialize)]

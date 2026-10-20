@@ -24,6 +24,10 @@ pub(super) fn provision_request(
     config: Option<&MicroVmProvisionConfig>,
     capabilities: &Capabilities,
 ) -> Result<(ProvisionRequest, SandboxSpec), MxcError> {
+    MicroVmProvisionConfig::validate_memory_mib(
+        config.map_or(request.microvm_memory_mib, |config| config.memory_mib),
+    )
+    .map_err(|error| MxcError::malformed_request(error.to_string()))?;
     validate_request(request)?;
     let image = config
         .map(|config| config.image.as_str())
@@ -45,7 +49,7 @@ pub(super) fn provision_request(
     if let Some(proxy) = request.policy.network_proxy.address.as_ref() {
         provision = provision.with_network_proxy(proxy.to_url());
     }
-    if let Some(memory) = config.and_then(|config| config.memory_mib) {
+    if let Some(memory) = config.map_or(request.microvm_memory_mib, |config| config.memory_mib) {
         spec = spec.with_memory_mib(memory);
     }
     Ok((provision, spec))
@@ -97,6 +101,8 @@ pub(super) fn exec_request(
 }
 
 pub(super) fn validate_request(request: &ExecutionRequest) -> Result<(), MxcError> {
+    MicroVmProvisionConfig::validate_memory_mib(request.microvm_memory_mib)
+        .map_err(|error| MxcError::malformed_request(error.to_string()))?;
     if !request.policy.enumerate_paths.is_empty() {
         return Err(MxcError::policy_validation(
             "NVX does not support filesystem.enumeratePaths",
@@ -257,7 +263,11 @@ fn validate_provision_capabilities(
             _ => {}
         }
     }
-    if config.and_then(|config| config.memory_mib).is_some() && !capabilities.spec.memory {
+    if config
+        .map_or(request.microvm_memory_mib, |config| config.memory_mib)
+        .is_some()
+        && !capabilities.spec.memory
+    {
         return Err(unsupported("microvm.provision.memoryMib"));
     }
     Ok(())
@@ -408,6 +418,7 @@ mod tests {
         let request = ContainerRequest {
             containment: Containment::MicroVm {
                 image: "python:3.12-alpine".to_owned(),
+                memory_mib: None,
             },
             network: Some(NetworkPolicy {
                 egress: Some(NetworkEgressPolicy {
@@ -577,6 +588,7 @@ mod tests {
             let request = ContainerRequest {
                 containment: Containment::MicroVm {
                     image: image.to_owned(),
+                    memory_mib: None,
                 },
                 filesystem: Some(FilesystemPolicy {
                     readonly_paths: vec![r"C:\ro".to_owned()],
@@ -651,6 +663,121 @@ mod tests {
             spec.resources.and_then(|resources| resources.memory_mib),
             Some(1024)
         );
+    }
+
+    #[test]
+    fn creation_memory_typed_and_json_paths_reach_native_spec_and_policy_identity() {
+        use crate::mxc_common::{
+            config_parser::load_mxc_request_from_json,
+            logger::{Logger, Mode},
+            policy_identity::policy_hash,
+            state_aware_operation::{StateAwareOperation, StateAwareProvision},
+            state_aware_request::MxcRequest,
+        };
+        use crate::v1::{ContainerRequest, Containment};
+        let mut identities = Vec::new();
+        for memory_mib in [None, Some(512), Some(1024)] {
+            let mut typed = ContainerRequest::new("printf memory");
+            typed.container_name = Some("memory-test".to_owned());
+            typed.containment = Containment::MicroVm {
+                image: "python:3.12-alpine".to_owned(),
+                memory_mib,
+            };
+            let prepared = crate::policy::prepare_creation_request(&typed, None).unwrap();
+            assert_eq!(prepared.inner.microvm_memory_mib, memory_mib);
+            let mut json = serde_json::json!({
+                "version":"1.1.0-alpha", "containment":"microvm",
+                "containerId":"memory-test", "lifecycle":{"destroyOnExit":true,"preservePolicy":false},
+                "process":{"commandLine":"printf memory","timeout":0},
+                "filesystem":{"readwritePaths":[],"readonlyPaths":[],"deniedPaths":[]},
+                "microvm":{"image":"python:3.12-alpine"}
+            });
+            if let Some(memory) = memory_mib {
+                json["microvm"]["provision"] = serde_json::json!({"memoryMib": memory});
+            }
+            let MxcRequest::OneShot(parsed) =
+                load_mxc_request_from_json(&json.to_string(), &mut Logger::new(Mode::Buffer))
+                    .unwrap()
+            else {
+                panic!("expected creation")
+            };
+            assert_eq!(parsed.microvm_memory_mib, memory_mib);
+            assert_eq!(policy_hash(&prepared.inner), policy_hash(&parsed));
+            identities.push(policy_hash(&parsed));
+            for request in [&prepared.inner, &parsed] {
+                let (_, spec) = provision_request(request, None, &capabilities()).unwrap();
+                assert_eq!(
+                    spec.resources.and_then(|resources| resources.memory_mib),
+                    memory_mib
+                );
+            }
+            json.as_object_mut().unwrap().remove("process");
+            json.as_object_mut().unwrap().remove("containerId");
+            json.as_object_mut().unwrap().remove("lifecycle");
+            json["phase"] = serde_json::json!("provision");
+            let MxcRequest::StateAware(parsed) =
+                load_mxc_request_from_json(&json.to_string(), &mut Logger::new(Mode::Buffer))
+                    .unwrap()
+            else {
+                panic!("expected provision")
+            };
+            let StateAwareOperation::Provision(StateAwareProvision::MicroVm(Some(config))) =
+                parsed.operation()
+            else {
+                panic!("expected MicroVM config")
+            };
+            assert_eq!(config.memory_mib, memory_mib);
+            let (_, spec) =
+                provision_request(parsed.request(), Some(config), &capabilities()).unwrap();
+            assert_eq!(
+                spec.resources.and_then(|resources| resources.memory_mib),
+                memory_mib
+            );
+            let typed_provision =
+                crate::v1::ProvisionRequest::microvm("python:3.12-alpine", memory_mib)
+                    .into_sdk_input(None)
+                    .unwrap();
+            let typed_provision =
+                crate::mxc_common::config_parser::normalize_sdk_state_aware_request(
+                    typed_provision,
+                    &mut Logger::new(Mode::Buffer),
+                )
+                .unwrap();
+            let StateAwareOperation::Provision(StateAwareProvision::MicroVm(Some(typed_config))) =
+                typed_provision.operation()
+            else {
+                panic!("expected typed provision config")
+            };
+            assert_eq!(typed_config, config);
+            let (_, spec) = provision_request(
+                typed_provision.request(),
+                Some(typed_config),
+                &capabilities(),
+            )
+            .unwrap();
+            assert_eq!(
+                spec.resources.and_then(|resources| resources.memory_mib),
+                memory_mib
+            );
+            if memory_mib.is_some() {
+                let mut unsupported = capabilities();
+                unsupported.spec.memory = false;
+                for (request, config) in [(&prepared.inner, None), (parsed.request(), Some(config))]
+                {
+                    let error = provision_request(request, config, &unsupported).unwrap_err();
+                    assert_eq!(
+                        error.code,
+                        crate::mxc_common::mxc_error::MxcErrorCode::PolicyValidation
+                    );
+                    assert_eq!(
+                        error.message,
+                        "the configured NVX runtime does not support microvm.provision.memoryMib"
+                    );
+                }
+            }
+        }
+        assert_ne!(identities[0], identities[1]);
+        assert_ne!(identities[1], identities[2]);
     }
 
     #[test]

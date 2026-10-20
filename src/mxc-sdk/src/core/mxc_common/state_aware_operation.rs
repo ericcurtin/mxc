@@ -110,12 +110,8 @@ impl StateAwareOperation {
                     None => Ok(()),
                 }
             }
-            Self::Provision(StateAwareProvision::MicroVm(Some(config)))
-                if config.memory_mib == Some(0) =>
-            {
-                Err(crate::mxc_common::error::WxcError::Validation(
-                    "microvm.provision.memoryMib must be greater than zero".to_owned(),
-                ))
+            Self::Provision(StateAwareProvision::MicroVm(Some(config))) => {
+                MicroVmProvisionConfig::validate_memory_mib(config.memory_mib)
             }
             Self::Provision(_)
             | Self::Start { .. }

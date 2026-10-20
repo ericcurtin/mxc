@@ -627,10 +627,10 @@
     },
     "MicroVmProvision": {
       "additionalProperties": false,
-      "description": "MicroVM settings accepted during provisioning.",
+      "description": "MicroVM creation settings shared by create-and-run and provision requests.",
       "properties": {
         "memoryMib": {
-          "description": "Guest memory in MiB. Zero is rejected by backend semantic validation.",
+          "description": "Guest memory in MiB. Zero is rejected by semantic validation.",
           "maximum": 4294967295,
           "minimum": 0.0,
           "type": "integer"
@@ -954,6 +954,10 @@
         "image": {
           "$ref": "#/definitions/ImageReference",
           "description": "Registry image reference resolved by the signed NVX agent."
+        },
+        "provision": {
+          "$ref": "#/definitions/MicroVmProvision",
+          "description": "Optional settings applied when creating the MicroVM."
         }
       },
       "required": [

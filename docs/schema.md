@@ -24,7 +24,11 @@ Development MicroVM creation requires an explicit registry image reference in
 ```
 
 Create-and-run requests use the same `microvm.image` field, omit `phase`, and
-include `process.commandLine`; `microvm.provision` is provision-only. There is
+include `process.commandLine`. Both creation paths accept optional
+`microvm.provision.memoryMib`, a positive integer measured in MiB. Omitting it
+or supplying `provision: {}` leaves the backend's memory default unchanged.
+Explicit `null`, zero, negative values, and non-integer values are rejected
+before backend setup. Existing-container execution cannot replace image or memory. There is
 no default image. Missing, empty, whitespace-containing or control-character
 image input is rejected before backend setup. Registry-reference syntax and
 materialization are owned by the signed NVX runtime; host image files and

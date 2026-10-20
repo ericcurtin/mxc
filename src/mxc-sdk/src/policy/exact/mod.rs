@@ -128,6 +128,7 @@ mod tests {
                 &ContainerPolicy::default(),
                 &Containment::MicroVm {
                     image: image.to_owned(),
+                    memory_mib: None,
                 },
                 "echo hello",
                 None,
@@ -140,6 +141,7 @@ mod tests {
                 &ContainerPolicy::default(),
                 &Containment::MicroVm {
                     image: image.to_owned(),
+                    memory_mib: None,
                 },
                 "echo hello",
                 None,

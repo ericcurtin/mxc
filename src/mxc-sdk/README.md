@@ -193,13 +193,23 @@ lifecycle operations. Creation requires an explicit registry image:
 use mxc_sdk::v1::{Containment, ContainerRequest, ProvisionRequest};
 
 let mut request = ContainerRequest::new("python --version");
-request.containment = Containment::MicroVm { image: "python:3.12-alpine".to_owned() };
+request.containment = Containment::MicroVm {
+    image: "python:3.12-alpine".to_owned(),
+    memory_mib: None, // Use the backend's memory default.
+};
+let mut sized_request = ContainerRequest::new("python --version");
+sized_request.containment = Containment::MicroVm {
+    image: "python:3.12-alpine".to_owned(),
+    memory_mib: Some(512),
+};
+let default_provision = ProvisionRequest::microvm("python:3.12-alpine", None);
 let provision = ProvisionRequest::microvm("python:3.12-alpine", Some(512));
 ```
 
 The development `1.1.0-alpha` JSON creation paths require `microvm.image`;
-provision also accepts optional `microvm.provision.memoryMib`. Image selection
-is fixed at creation, not accepted by later executions. Blank or
+both also accept optional `microvm.provision.memoryMib`. `None` leaves memory
+unspecified; `Some(512)` requests 512 MiB. Image and memory selection
+are fixed at creation, not accepted by later executions. Blank or
 whitespace/control-containing image input fails before backend setup, and
 unsupported image-reference capabilities fail explicitly. Registry syntax and
 resolution errors come from NVX; MXC does not implement a second image parser.

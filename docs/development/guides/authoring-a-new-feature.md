@@ -18,7 +18,7 @@
 
 The development MicroVM contract illustrates creation-time configuration:
 `microvm.image` is required for both create-and-run and provision, whereas
-`microvm.provision.memoryMib` is provision-only. Keep the image at its permanent
+`microvm.provision.memoryMib` is optional on both creation paths. Keep the image at its permanent
 location, require callers to choose it, and reject missing/blank input before
 opening backend state. Later lifecycle requests cannot replace it. Preserve
 published contracts and SDK targets when changing this experimental surface.
@@ -137,7 +137,7 @@ when the SDK target advances to a published contract containing that field.
 The experimental Rust MicroVM creation APIs are an explicit exception:
 `v1::experimental::run` and `v1::experimental::spawn` use their owning development-contract builder in
 `src/mxc-sdk/src/policy/exact/dev_microvm.rs`, without changing the published
-V1 SDK target. `Containment::MicroVm { image }` requires a registry image
+V1 SDK target. `Containment::MicroVm { image, memory_mib }` requires a registry image
 reference and maps it to root-level `microvm.image` in `1.1.0-alpha`.
 Stable `run`/`spawn` reject MicroVM without runtime authorization; native
 execution still requires `--experimental`, Windows x64 and the `microvm`

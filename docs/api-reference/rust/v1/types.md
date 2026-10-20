@@ -149,7 +149,7 @@ impl ContainerRequest {
 The SDK-defined backend choices carried by `ContainerRequest`. Select a variant with
 its typed configuration; the native engine validates backend and policy support.
 
-Experimental MicroVM creation selects `Containment::MicroVm { image: String }`.
+Experimental MicroVM creation selects `Containment::MicroVm { image: String, memory_mib: Option<u32> }`.
 `image` is a required nonblank registry image reference resolved by the NVX
 runtime. Use `v1::experimental::run` for captured execution or
 `v1::experimental::spawn` for live execution; the published V1 contract target
@@ -165,7 +165,7 @@ pub enum Containment {
   Bubblewrap,
   Wslc(WslcConfig),
   IsolationSession,
-  MicroVm { image: String },
+  MicroVm { image: String, memory_mib: Option<u32> },
 }
 ```
 
@@ -274,7 +274,10 @@ pub struct FilesystemPolicy {
 
 Experimental NVX MicroVM selection. Enable the Cargo `microvm` feature and use
 an operation under `mxc_sdk::v1::experimental`. The variant requires an explicit
-registry image reference: `Containment::MicroVm { image: String }`.
+registry image reference:
+`Containment::MicroVm { image: String, memory_mib: Option<u32> }`.
+Use `memory_mib: None` for the backend default or `memory_mib: Some(512)`
+to request 512 MiB. Zero is rejected; no MXC memory default or maximum is added.
 
 ## `mxc_sdk::v1::ProvisionRequest::microvm`
 
