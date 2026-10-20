@@ -355,6 +355,7 @@ fn unsupported(feature: &str) -> MxcError {
 mod tests {
     use super::*;
     use crate::mxc_common::models::{NetworkEgressPolicy, NetworkIngressPolicy};
+    use crate::mxc_common::mxc_error::MxcErrorCode;
 
     fn request() -> ExecutionRequest {
         ExecutionRequest {
@@ -397,12 +398,15 @@ mod tests {
         let mut request = request();
         for image in [None, Some(""), Some(" "), Some("python:\n3.12")] {
             request.microvm_image = image.map(str::to_owned);
-            assert!(provision_request(&request, &capabilities()).is_err());
+            let error = provision_request(&request, &capabilities()).unwrap_err();
+            assert_eq!(error.code, MxcErrorCode::MalformedRequest, "{error}");
+            assert!(error.message.contains("microvm.image"), "{error}");
         }
         request.microvm_image = Some("python:3.12-alpine".to_owned());
         let mut unsupported = capabilities();
         unsupported.spec.image_reference = false;
         let error = provision_request(&request, &unsupported).unwrap_err();
+        assert_eq!(error.code, MxcErrorCode::PolicyValidation, "{error}");
         assert!(error.message.contains("microvm.image"));
     }
 

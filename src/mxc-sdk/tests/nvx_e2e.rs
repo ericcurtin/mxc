@@ -21,7 +21,8 @@ fn microvm_creation_rejects_missing_and_blank_images_before_runtime() {
             request["microvm"] = serde_json::json!({"image": image});
         }
         let error = mxc_sdk::__ffi::run_json(&request.to_string(), true).unwrap_err();
-        assert!(error.message.contains("microvm"), "{error}");
+        assert_eq!(error.code, ErrorCode::MalformedRequest, "{error}");
+        assert!(error.message.contains("microvm.image"), "{error}");
     }
 }
 
@@ -39,6 +40,7 @@ fn microvm_typed_stable_run_and_spawn_require_optin() {
         } else {
             mxc_sdk::v1::run(request, Default::default()).unwrap_err()
         };
+        assert_eq!(error.code, ErrorCode::BackendUnavailable, "{error}");
         assert!(error.message.contains("experimental"), "{error}");
     }
 }
@@ -50,6 +52,7 @@ fn microvm_experimental_typed_run_rejects_blank_image_before_runtime() {
         image: " ".to_owned(),
     };
     let error = mxc_sdk::v1::experimental::run(request, Default::default()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::MalformedRequest, "{error}");
     assert!(error.message.contains("microvm.image"), "{error}");
 }
 
