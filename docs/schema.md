@@ -148,6 +148,9 @@ egress defaults and CIDR/protocol/port rules. Ingress deny and host-loopback
 deny are supported; allow postures fail closed when the runtime does not
 advertise them. `runtimeConfig.networkProxy` is accepted only during provision
 or create-and-run because networking is immutable after the VM starts.
+MicroVM `exec` requests must omit `network`, including an empty object or a
+policy identical to the provisioned policy; supplying it returns
+`PolicyValidation` before backend setup.
 
 ```json
 {

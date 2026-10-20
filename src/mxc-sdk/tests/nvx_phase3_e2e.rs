@@ -334,6 +334,187 @@ fn experimental_opt_in_is_required_before_backend_discovery() {
 }
 
 #[test]
+fn exec_network_policy_is_rejected_before_runtime_setup_on_public_lifecycle_paths() {
+    const CHILD: &str = "MXC_NVX_EXEC_NETWORK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join("absent-local");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "exec_network_policy_is_rejected_before_runtime_setup_on_public_lifecycle_paths",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("LOCALAPPDATA", &local)
+            .env(
+                aci_edge_sandboxes::agent::BundledAgent::ENV_DIR,
+                root.path().join("absent-bundle"),
+            )
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "exec-network child failed: {status}");
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("exec-network child exceeded deadline");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        return;
+    }
+
+    let base = serde_json::json!({
+        "version": "1.1.0-alpha", "phase": "exec",
+        "sandboxId": "microvm:0123456789abcdef0123456789abcdef",
+        "process": {"commandLine": "printf forbidden"}
+    });
+    let state_root = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap());
+    for network in [
+        serde_json::json!({}),
+        serde_json::json!({"egress": {"default": "deny"}}),
+        serde_json::json!({"egress": {"default": "allow"}}),
+        serde_json::json!({"ingress": {"default": "deny", "hostLoopback": "deny"}}),
+        serde_json::json!({"ingress": {"default": "allow", "hostLoopback": "allow"}}),
+        serde_json::json!({"egress": {"allow": []}}),
+        serde_json::json!({"egress": {"deny": []}}),
+        serde_json::json!({"egress": {"allow": [{"to": [{"cidr": "10.0.0.0/8"}]}]}}),
+        serde_json::json!({"egress": {"deny": [{"to": [{"cidr": "192.0.2.0/24"}]}]}}),
+    ] {
+        let mut request = base.clone();
+        request["network"] = network;
+        let error =
+            mxc_sdk::__ffi::run_lifecycle_json(&request.to_string(), true, true).unwrap_err();
+        assert_eq!(error.code, ErrorCode::PolicyValidation);
+        assert_eq!(
+            error.message,
+            "MicroVM network policy is fixed at provision"
+        );
+        let error = mxc_sdk::__ffi::execute_lifecycle_json(&request.to_string(), true)
+            .err()
+            .expect("piped exec must reject provision-time network policy");
+        assert_eq!(error.code, ErrorCode::PolicyValidation);
+        assert_eq!(
+            error.message,
+            "MicroVM network policy is fixed at provision"
+        );
+        assert!(
+            !state_root.exists(),
+            "network refusal created lifecycle state"
+        );
+    }
+    for invalid in [
+        serde_json::Value::Null,
+        serde_json::json!({"egress": {"default": "invalid"}}),
+        serde_json::json!({"unknown": true}),
+    ] {
+        let mut request = base.clone();
+        request["network"] = invalid;
+        let error =
+            mxc_sdk::__ffi::run_lifecycle_json(&request.to_string(), true, true).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedRequest);
+    }
+    let mut proxy = base.clone();
+    proxy["network"] = serde_json::json!({});
+    proxy["runtimeConfig"] = serde_json::json!({"networkProxy": "http://127.0.0.1:3128"});
+    let error = mxc_sdk::__ffi::run_lifecycle_json(&proxy.to_string(), true, true).unwrap_err();
+    assert_eq!(error.code, ErrorCode::PolicyValidation);
+    assert_eq!(
+        error.message,
+        "MicroVM network proxy policy is fixed at provision"
+    );
+    assert!(!state_root.exists());
+
+    // Typed exec exposes only runtime proxy settings, not egress or ingress policy.
+    let id = v1::ContainerId::parse("microvm:0123456789abcdef0123456789abcdef").unwrap();
+    let mut request = ExecutionRequest::new("printf forbidden");
+    request.network = Some(v1::ProcessNetworkPolicy {
+        runtime_config: Some(NetworkRuntimeConfig {
+            network_proxy: Some("http://127.0.0.1:3128".to_owned()),
+        }),
+    });
+    let error = v1::experimental::container::validate_process(
+        &id,
+        request.clone(),
+        SpawnInContainerOptions::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::PolicyValidation);
+    assert_eq!(
+        error.message,
+        "MicroVM network proxy policy is fixed at provision"
+    );
+    let error = v1::experimental::container::spawn_in_container(
+        &id,
+        request.clone(),
+        SpawnInContainerOptions::default(),
+    )
+    .err()
+    .expect("typed runtime proxy must still fail before discovery");
+    assert_eq!(error.code, ErrorCode::PolicyValidation);
+    assert_eq!(
+        error.message,
+        "MicroVM network proxy policy is fixed at provision"
+    );
+    let error = v1::experimental::container::run_in_container(
+        &id,
+        request,
+        RunInContainerOptions::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::PolicyValidation);
+    assert_eq!(
+        error.message,
+        "MicroVM network proxy policy is fixed at provision"
+    );
+    assert!(!state_root.exists());
+
+    let error = mxc_sdk::__ffi::run_lifecycle_json(&base.to_string(), true, true).unwrap_err();
+    assert_eq!(error.code, ErrorCode::BackendUnavailable);
+    assert!(error.message.contains("NVX"), "{error}");
+    let error = mxc_sdk::__ffi::execute_lifecycle_json(&base.to_string(), true)
+        .err()
+        .expect("missing bundle must prevent omitted-network execution");
+    assert_eq!(error.code, ErrorCode::BackendUnavailable);
+    for network in [None, Some(v1::ProcessNetworkPolicy::default())] {
+        for operation in ["validate", "spawn", "run"] {
+            let mut request = ExecutionRequest::new("printf forbidden");
+            request.network = network.clone();
+            let error = match operation {
+                "validate" => v1::experimental::container::validate_process(
+                    &id,
+                    request,
+                    SpawnInContainerOptions::default(),
+                )
+                .err()
+                .unwrap(),
+                "spawn" => v1::experimental::container::spawn_in_container(
+                    &id,
+                    request,
+                    SpawnInContainerOptions::default(),
+                )
+                .err()
+                .unwrap(),
+                "run" => v1::experimental::container::run_in_container(
+                    &id,
+                    request,
+                    RunInContainerOptions::default(),
+                )
+                .unwrap_err(),
+                _ => unreachable!(),
+            };
+            assert_eq!(error.code, ErrorCode::BackendUnavailable);
+            assert!(error.message.contains("NVX"), "{error}");
+        }
+    }
+}
+
+#[test]
 fn unsupported_ui_policy_is_rejected_before_runtime_discovery() {
     let mut request = process_only_request("printf ok");
     request["ui"] = serde_json::json!({"disable": true});

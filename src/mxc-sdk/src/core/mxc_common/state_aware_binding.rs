@@ -200,7 +200,7 @@ where
 }
 
 /// Bind a MicroVM operation, preserving provision configuration and rejecting
-/// proxy changes after provision.
+/// network and proxy settings on existing-container execution.
 pub fn bind_microvm<B>(
     parsed: ParsedStateAwareRequest,
 ) -> Result<BoundStateAwareRequest<B>, MxcError>
@@ -219,6 +219,11 @@ where
     {
         return Err(MxcError::policy_validation(
             "MicroVM network proxy policy is fixed at provision",
+        ));
+    }
+    if parsed.phase() == Phase::Exec && parsed.request().policy.network_specified {
+        return Err(MxcError::policy_validation(
+            "MicroVM network policy is fixed at provision",
         ));
     }
     BoundStateAwareRequest::bind(
