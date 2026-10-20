@@ -78,6 +78,7 @@ if ($sandboxId -notlike "microvm:*") {
     throw "unexpected sandbox ID: $sandboxId"
 }
 
+$primaryError = $null
 try {
     $start = Invoke-MicroVmPhase -Phase "start" -SandboxId $sandboxId -Payload @{
         version = "1.1.0-alpha"
@@ -100,12 +101,22 @@ try {
     if ($stop.ExitCode -ne 0) {
         throw "stop failed: exit=$($stop.ExitCode) stdout=$($stop.Stdout) stderr=$($stop.Stderr)"
     }
+} catch {
+    $primaryError = $_
+    throw
 } finally {
-    $deprovision = Invoke-MicroVmPhase -Phase "deprovision" -SandboxId $sandboxId -Payload @{
-        version = "1.1.0-alpha"
-    }
-    if ($deprovision.ExitCode -ne 0) {
-        throw "deprovision failed: exit=$($deprovision.ExitCode) stdout=$($deprovision.Stdout) stderr=$($deprovision.Stderr)"
+    try {
+        $deprovision = Invoke-MicroVmPhase -Phase "deprovision" -SandboxId $sandboxId -Payload @{
+            version = "1.1.0-alpha"
+        }
+        if ($deprovision.ExitCode -ne 0) {
+            throw "deprovision failed: exit=$($deprovision.ExitCode) stdout=$($deprovision.Stdout) stderr=$($deprovision.Stderr)"
+        }
+    } catch {
+        if ($null -ne $primaryError) {
+            throw "Primary lifecycle failure: $primaryError`nDeprovision cleanup failure: $_"
+        }
+        throw
     }
 }
 

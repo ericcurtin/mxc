@@ -214,7 +214,13 @@ fn powershell_lifecycle_failures_report_both_streams_and_preserve_cleanup() {
         if "%2"=="%MXC_NVX_FAIL_PHASE%" (
           echo {"error":{"code":"BackendError","message":"STDOUT_%2_JSON_ERROR"}}
           echo STDERR_%2_MARKER 1>&2
+          if "%MXC_NVX_REMOVE_EXECUTOR%"=="1" del "%~f0"
           exit /b 23
+        )
+        if "%2"=="%MXC_NVX_CLEANUP_FAIL_PHASE%" (
+          echo {"error":{"code":"BackendError","message":"STDOUT_%2_JSON_ERROR"}}
+          echo STDERR_%2_MARKER 1>&2
+          exit /b 31
         )
         if "%2"=="provision" (
           echo {"result":{"sandboxId":"microvm:fake-host-only"}}
@@ -227,24 +233,50 @@ fn powershell_lifecycle_failures_report_both_streams_and_preserve_cleanup() {
         "#,
     )
     .unwrap();
-    for (failure, expected) in [
-        ("provision", vec!["provision"]),
-        ("start", vec!["provision", "start", "deprovision"]),
-        ("exec", vec!["provision", "start", "exec", "deprovision"]),
+    for (failure, cleanup_failure, expected) in [
+        ("provision", None, vec!["provision"]),
+        ("start", None, vec!["provision", "start", "deprovision"]),
+        (
+            "exec",
+            None,
+            vec!["provision", "start", "exec", "deprovision"],
+        ),
         (
             "stop",
+            None,
             vec!["provision", "start", "exec", "stop", "deprovision"],
         ),
         (
             "deprovision",
+            None,
             vec!["provision", "start", "exec", "stop", "deprovision"],
         ),
         (
             "none",
+            None,
             vec!["provision", "start", "exec", "stop", "deprovision"],
         ),
+        (
+            "start",
+            Some("exit"),
+            vec!["provision", "start", "deprovision"],
+        ),
+        (
+            "exec",
+            Some("exit"),
+            vec!["provision", "start", "exec", "deprovision"],
+        ),
+        (
+            "stop",
+            Some("exit"),
+            vec!["provision", "start", "exec", "stop", "deprovision"],
+        ),
+        ("exec", Some("launch"), vec!["provision", "start", "exec"]),
     ] {
-        let events = root.path().join(format!("{failure}-events.txt"));
+        let events = root.path().join(format!(
+            "{failure}-{}-events.txt",
+            cleanup_failure.unwrap_or("none")
+        ));
         let mut stdout = tempfile::tempfile().unwrap();
         let mut stderr = tempfile::tempfile().unwrap();
         let mut child = std::process::Command::new("powershell.exe")
@@ -259,6 +291,22 @@ fn powershell_lifecycle_failures_report_both_streams_and_preserve_cleanup() {
             .arg("-WxcExePath")
             .arg(&executor)
             .env("MXC_NVX_FAIL_PHASE", failure)
+            .env(
+                "MXC_NVX_CLEANUP_FAIL_PHASE",
+                if cleanup_failure.is_some() {
+                    "deprovision"
+                } else {
+                    "none"
+                },
+            )
+            .env(
+                "MXC_NVX_REMOVE_EXECUTOR",
+                if cleanup_failure == Some("launch") {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
             .env("MXC_NVX_PHASE_EVENTS", &events)
             .stdin(std::process::Stdio::null())
             .stdout(stdout.try_clone().unwrap())
@@ -294,12 +342,37 @@ fn powershell_lifecycle_failures_report_both_streams_and_preserve_cleanup() {
             assert!(out.contains("MicroVM state-aware executor E2E passed: microvm:fake-host-only"));
         } else {
             assert!(!status.success(), "{failure}");
+            // cmd exits 1 when its running batch file disappears.
+            let primary_exit = if cleanup_failure == Some("launch") {
+                1
+            } else {
+                23
+            };
             for required in [
-                format!("{failure} failed: exit=23"),
+                format!("{failure} failed: exit={primary_exit}"),
                 format!("STDOUT_{failure}_JSON_ERROR"),
                 format!("STDERR_{failure}_MARKER"),
             ] {
                 assert!(err.contains(&required), "missing {required}: {out}\n{err}");
+            }
+            if cleanup_failure == Some("exit") {
+                for required in [
+                    "Primary lifecycle failure:",
+                    "Deprovision cleanup failure:",
+                    "deprovision failed: exit=31",
+                    "STDOUT_deprovision_JSON_ERROR",
+                    "STDERR_deprovision_MARKER",
+                ] {
+                    assert!(err.contains(required), "missing {required}: {out}\n{err}");
+                }
+            } else if cleanup_failure == Some("launch") {
+                assert!(
+                    !executor.exists(),
+                    "fixture must force cleanup launch failure"
+                );
+                assert!(err.contains("Primary lifecycle failure:"), "{err}");
+                assert!(err.contains("Deprovision cleanup failure:"), "{err}");
+                assert!(!err.contains("deprovision failed: exit="), "{err}");
             }
         }
     }
