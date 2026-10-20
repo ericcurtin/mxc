@@ -32,10 +32,10 @@ Initialize-WpcContext @PSBoundParameters
 # of getting this wrong are user-visible — an unreachable local dev server, or
 # a loopback hole — and only a live run distinguishes them.
 #
-# `hostLoopback: "allow"` is PSEC-1.1-only; every other path must reject it
-# rather than accept it with partial enforcement.
-function Phase-NetworkHostLoopback {
-    Section 'Phase 8d: host-loopback policy'
+# BaseContainer must reach the host listener without a runtime proxy.
+# AppContainer tiers must reject hostLoopback=allow.
+function Phase-NetworkDirectHostLoopback {
+    Section 'Phase 8d: direct host-loopback policy'
 
     if ($SkipNetwork) {
         Record-Result -Phase 'P8d' -Name 'host loopback' -Status 'skip' -Detail '-SkipNetwork'
@@ -45,7 +45,7 @@ function Phase-NetworkHostLoopback {
     $listener = Start-LoopbackListener
     if (-not $listener) {
         Record-Result -Phase 'P8d' -Name 'host loopback listener' -Pass $false `
-            -Detail 'could not bind an HttpListener on 127.0.0.1; cannot assert either direction'
+            -Detail 'could not bind a TcpListener on 127.0.0.1; cannot assert either direction'
         return
     }
 
@@ -69,63 +69,53 @@ function Phase-NetworkHostLoopback {
             -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
             -EgressDefault 'allow' -TimeoutMs 25000
         $trap = Invoke-NetRun -Name 'net-loopback-trap' -ConfigPath $cfgTrap
+        $trapBlocked = (-not $trap.Result.TimedOut) -and
+            ($trap.Result.ExitCode -in @(7, 28)) -and
+            ($trap.Result.Stderr -match 'curl: \((7|28)\)')
         Record-Result -Phase 'P8d' -Name 'omitted hostLoopback defaults to deny even under egress=allow' `
-            -Pass ($trap.Verdict -eq 'BLOCKED') `
-            -Detail "verdict=$($trap.Verdict); documented default-deny, not an inherit of egress/ingress default"
+            -Pass $trapBlocked `
+            -Detail "exit=$($trap.Result.ExitCode); stderr=$(Format-Snippet $trap.Result.Stderr); documented default-deny"
 
         # Explicit deny, spelled out.
         $cfgDeny = New-Config -Name 'net-loopback-deny' -CommandLine $cmd `
             -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
             -EgressDefault 'allow' -IngressDefault 'deny' -HostLoopback 'deny' -TimeoutMs 25000
         $deny = Invoke-NetRun -Name 'net-loopback-deny' -ConfigPath $cfgDeny
+        $denyBlocked = (-not $deny.Result.TimedOut) -and
+            ($deny.Result.ExitCode -in @(7, 28)) -and
+            ($deny.Result.Stderr -match 'curl: \((7|28)\)')
         Record-Result -Phase 'P8d' -Name 'explicit hostLoopback=deny blocks container -> host loopback' `
-            -Pass ($deny.Verdict -eq 'BLOCKED') -Detail "verdict=$($deny.Verdict)"
+            -Pass $denyBlocked -Detail "exit=$($deny.Result.ExitCode); stderr=$(Format-Snippet $deny.Result.Stderr)"
         Record-Result -Phase 'P8d' -Name 'omitted and explicit hostLoopback=deny agree' `
-            -Pass ((Test-VerdictsRan @($trap, $deny)) -and ($trap.Verdict -eq $deny.Verdict)) `
-            -Detail "omitted=$($trap.Verdict); explicit=$($deny.Verdict)"
+            -Pass ($trapBlocked -and $denyBlocked) `
+            -Detail "omittedExit=$($trap.Result.ExitCode); explicitExit=$($deny.Result.ExitCode)"
 
-        # hostLoopback=allow. `ingress.default: allow` accompanies it because
-        # the private-network capability is what the doc pairs with the
-        # loopback grant; the specific value overrides the default for the
-        # loopback path.
-        $cfgAllow = New-Config -Name 'net-loopback-allow' -CommandLine $cmd `
-            -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
-            -EgressDefault 'allow' -IngressDefault 'allow' -HostLoopback 'allow' -TimeoutMs 25000
-        $allow = Invoke-NetRun -Name 'net-loopback-allow' -ConfigPath $cfgAllow
+        # Loopback permission is independent of the private-network ingress default.
+        foreach ($ingressDefault in @('allow', 'deny')) {
+            $name = "net-loopback-allow-ingress-$ingressDefault"
+            $cfgAllow = New-Config -Name $name -CommandLine $cmd `
+                -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+                -EgressDefault 'allow' -IngressDefault $ingressDefault -HostLoopback 'allow' -TimeoutMs 25000
+            $allow = Invoke-NetRun -Name $name -ConfigPath $cfgAllow
 
-        if (Test-PsecEligible) {
-            # On a PSEC 1.1 host this must work. On a PSEC 1.0 host the
-            # documented behavior is rejection — so either outcome is
-            # defensible, but "accepted and silently unenforced" is not.
-            $accepted = ($allow.Verdict -eq 'REACHED')
-            $rejected = Test-WasRejected $allow
-            Record-Result -Phase 'P8d' -Name 'hostLoopback=allow is either enforced or rejected, never silently dropped' `
-                -Pass ($accepted -or $rejected) `
-                -Detail "verdict=$($allow.Verdict); exit=$($allow.Result.ExitCode); timedOut=$($allow.Result.TimedOut); accepted=$accepted rejected=$rejected"
-            if ($accepted) {
-                Record-Result -Phase 'P8d' -Name 'hostLoopback=allow reaches the host loopback anchor (PSEC 1.1)' `
-                    -Pass $true -Detail 'bidirectional host-loopback grant honored'
-            } elseif ($rejected) {
-                Record-Result -Phase 'P8d' -Name 'hostLoopback=allow rejected (PSEC 1.1 ingress contract unavailable)' `
-                    -Status 'skip' -Detail "exit=$($allow.Result.ExitCode); documented fallback when contract 1.1 is absent"
+            if (Test-PsecEligible) {
+                Record-Result -Phase 'P8d' -Name "hostLoopback=allow with ingress.default=$ingressDefault without a runtime proxy stays on BaseContainer" `
+                    -Pass (Test-SelectedTier $allow.Log) `
+                    -Detail "selectedTier=$(Get-SelectedTier $allow.Log); expected=base-container"
+                Record-Result -Phase 'P8d' -Name "hostLoopback=allow with ingress.default=$ingressDefault without a runtime proxy reaches the host loopback anchor" `
+                    -Pass (($allow.Result.Stdout.Trim() -eq 'MXC-LOOPBACK-ANCHOR') -and ($allow.Result.ExitCode -eq 0) -and -not $allow.Result.TimedOut) `
+                    -Detail "exit=$($allow.Result.ExitCode); timedOut=$($allow.Result.TimedOut); stderr=$(Format-Snippet $allow.Result.Stderr); rejection is a regression, not a skip"
             } else {
-                # Neither enforced nor refused. Calling this a skip would name an
-                # outcome that did not happen.
-                Record-Result -Phase 'P8d' -Name 'hostLoopback=allow reaches the host loopback anchor (PSEC 1.1)' `
-                    -Pass $false `
-                    -Detail "verdict=$($allow.Verdict); exit=$($allow.Result.ExitCode); neither reached the anchor nor produced a typed rejection"
+                $rejected = Test-WasRejected $allow
+                Record-Result -Phase 'P8d' -Name "non-PSEC tier rejects hostLoopback=allow with ingress.default=$ingressDefault" `
+                    -Pass $rejected `
+                    -Detail "verdict=$($allow.Verdict); exit=$($allow.Result.ExitCode); timedOut=$($allow.Result.TimedOut); tier=$($Script:ExpectedTier)"
             }
-        } else {
-            $rejected = Test-WasRejected $allow
-            Record-Result -Phase 'P8d' -Name 'non-PSEC tier rejects hostLoopback=allow' `
-                -Pass $rejected `
-                -Detail "verdict=$($allow.Verdict); exit=$($allow.Result.ExitCode); timedOut=$($allow.Result.TimedOut); tier=$($Script:ExpectedTier)"
         }
     } finally {
         & $listener.Stop
     }
 }
 
-Invoke-WpcPhase -Key 'NetworkHostLoopback' -Body { Phase-NetworkHostLoopback }
+Invoke-WpcPhase -Key 'NetworkDirectHostLoopback' -Body { Phase-NetworkDirectHostLoopback }
 Complete-WpcChild
-
