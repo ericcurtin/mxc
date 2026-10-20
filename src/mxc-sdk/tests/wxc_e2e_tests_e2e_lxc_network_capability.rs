@@ -9,6 +9,7 @@ use serde_json::json;
 use wxc_e2e_tests::{has_lxc_host, has_platform_exec, run_platform_config_value};
 
 const CAP_NET_ADMIN: u64 = 1 << 12;
+const CAP_SYS_ADMIN: u64 = 1 << 21;
 
 /// Whether the LXC capability prerequisites are present.
 fn ready() -> bool {
@@ -73,4 +74,57 @@ fn workload_cannot_reconfigure_the_network() {
             "{field} still carries CAP_NET_ADMIN; the workload can rewrite the firewall confining it\n{status}"
         );
     }
+}
+
+#[test]
+fn workload_has_no_sys_admin_capability() {
+    if !ready() {
+        return;
+    }
+
+    let config = json!({
+        "version": "0.9.0-alpha",
+        "containerId": "lxc-sys-admin-capability",
+        "containment": "lxc",
+        "process": { "commandLine": "sh -c \"cat /proc/self/status\"" },
+        "lifecycle": { "destroyOnExit": true },
+        "lxc": { "distribution": "alpine", "release": "3.23" }
+    });
+
+    let status =
+        run_platform_config_value("lxc sys admin capability", &config, &[], None).combined_output();
+
+    for field in ["CapEff:", "CapPrm:", "CapInh:", "CapBnd:", "CapAmb:"] {
+        assert_eq!(
+            capability_mask(&status, field) & CAP_SYS_ADMIN,
+            0,
+            "{field} still carries CAP_SYS_ADMIN in the LXC workload\n{status}"
+        );
+    }
+}
+
+#[test]
+fn workload_cannot_remount_proc_sys_read_write() {
+    if !ready() {
+        return;
+    }
+
+    let config = json!({
+        "version": "0.9.0-alpha",
+        "containerId": "lxc-proc-sys-remount",
+        "containment": "lxc",
+        "process": {
+            "commandLine": "mount -o remount,rw /proc/sys; printf 'REMOUNT_EXIT=%s\\n' \"$?\""
+        },
+        "lifecycle": { "destroyOnExit": true },
+        "lxc": { "distribution": "alpine", "release": "3.23" }
+    });
+
+    let output =
+        run_platform_config_value("lxc proc sys remount", &config, &[], None).combined_output();
+
+    assert!(
+        output.lines().any(|line| line.trim() == "REMOUNT_EXIT=1"),
+        "the /proc/sys read-write remount did not report the expected refusal (exit 1)\n{output}"
+    );
 }

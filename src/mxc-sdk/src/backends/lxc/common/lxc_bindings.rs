@@ -135,6 +135,115 @@ pub enum ContainerFirewall {
     Absent,
 }
 
+const CAP_SYS_ADMIN: u32 = 21;
+
+#[cfg(target_os = "linux")]
+fn confine_inherited_sys_admin(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    // Linux capability ABI version 3 stores each set in two 32-bit words.
+    // https://github.com/torvalds/linux/blob/master/include/uapi/linux/capability.h
+    const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
+    #[repr(C)]
+    struct CapabilityHeader {
+        version: u32,
+        pid: libc::c_int,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CapabilityData {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+
+    // SAFETY: The child uses only stack storage and capability syscalls between fork and exec.
+    unsafe {
+        command.pre_exec(|| {
+            let mut header = CapabilityHeader {
+                version: CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let mut data = [CapabilityData {
+                effective: 0,
+                permitted: 0,
+                inheritable: 0,
+            }; 2];
+
+            if libc::syscall(
+                libc::SYS_capget,
+                &mut header as *mut CapabilityHeader,
+                data.as_mut_ptr(),
+            ) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            // Removing an inheritable capability also removes its ambient copy.
+            data[0].inheritable &= !(1 << CAP_SYS_ADMIN);
+
+            if libc::syscall(
+                libc::SYS_capset,
+                &header as *const CapabilityHeader,
+                data.as_ptr(),
+            ) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+fn validate_init_capabilities(status: &str, init_pid: u32) -> Result<(), String> {
+    if init_pid == 0 {
+        return Err("Container init PID must be positive".to_string());
+    }
+
+    for field in ["Pid", "CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"] {
+        let mut values = status.lines().filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            (name == field).then_some(value.trim())
+        });
+        let value = values
+            .next()
+            .ok_or_else(|| format!("Container init status is missing {field}"))?;
+        if values.next().is_some() {
+            return Err(format!(
+                "Container init status has duplicate {field} fields"
+            ));
+        }
+
+        if field == "Pid" {
+            if value.is_empty()
+                || !value.bytes().all(|byte| byte.is_ascii_digit())
+                || value.parse::<u32>() != Ok(init_pid)
+            {
+                return Err(format!(
+                    "Container init status Pid does not match expected PID {init_pid}: {value:?}"
+                ));
+            }
+            continue;
+        }
+
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(format!(
+                "Container init status has invalid {field}: {value:?}"
+            ));
+        }
+        let mask = u64::from_str_radix(value, 16)
+            .map_err(|e| format!("Container init status has invalid {field}: {value:?}: {e}"))?;
+        if mask & (1 << CAP_SYS_ADMIN) != 0 {
+            return Err(format!(
+                "Container init {field} still contains CAP_SYS_ADMIN; refusing execution"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn confine_network_capabilities(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
@@ -287,6 +396,11 @@ impl LxcContainer {
     fn lxc_command(&self, tool: &str) -> std::process::Command {
         let mut cmd = std::process::Command::new(tool);
         cmd.arg("-P").arg(&self.lxc_path).arg("-n").arg(&self.name);
+
+        #[cfg(target_os = "linux")]
+        if matches!(tool, "lxc-start" | "lxc-execute" | "lxc-attach") {
+            confine_inherited_sys_admin(&mut cmd);
+        }
         cmd
     }
 
@@ -389,6 +503,62 @@ impl LxcContainer {
         }
     }
 
+    fn query_info(&self, field: &str) -> Result<String, String> {
+        let output = self
+            .lxc_command("lxc-info")
+            .args([field, "-H"])
+            .output()
+            .map_err(|e| format!("Failed to inspect container {}: {e}", self.name))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Failed to inspect container {}: {}",
+                self.name,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        String::from_utf8(output.stdout)
+            .map(|stdout| stdout.trim().to_string())
+            .map_err(|e| format!("Invalid lxc-info output for container {}: {e}", self.name))
+    }
+
+    pub(crate) fn is_running_checked(&self) -> Result<bool, String> {
+        match self.query_info("-s")?.as_str() {
+            "RUNNING" => Ok(true),
+            "STOPPED" => Ok(false),
+            state => Err(format!(
+                "Unexpected state for container {}: {state:?}",
+                self.name
+            )),
+        }
+    }
+
+    pub(crate) fn verified_init_pid(&self) -> Result<u32, String> {
+        if !self.is_running_checked()? {
+            return Err(format!("Container {} is not running", self.name));
+        }
+        let pid = self.query_info("-p")?;
+        let init_pid = pid
+            .parse::<u32>()
+            .map_err(|e| format!("Invalid init PID for container {}: {pid:?}: {e}", self.name))?;
+        if init_pid == 0 || !pid.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(format!(
+                "Invalid init PID for container {}: {pid:?}",
+                self.name
+            ));
+        }
+        let status_path = format!("/proc/{init_pid}/status");
+        let status = std::fs::read_to_string(&status_path)
+            .map_err(|e| format!("Failed to read container init status {status_path}: {e}"))?;
+        validate_init_capabilities(&status, init_pid)?;
+        if self.query_info("-p")? != pid {
+            return Err(format!(
+                "Container {} init PID changed during capability verification",
+                self.name
+            ));
+        }
+        Ok(init_pid)
+    }
+
     pub fn init_pid(&self) -> Option<u32> {
         let output = self.lxc_command("lxc-info").arg("-p").output().ok()?;
         if !output.status.success() {
@@ -485,8 +655,11 @@ impl LxcContainer {
 
     pub fn start(&self, network: StartNetwork) -> Result<(), String> {
         let mut cmd = self.lxc_command("lxc-start");
+        cmd.args(["-s", "lxc.cap.drop=sys_admin"]);
         cmd.args(network.to_start_args(self.configured_interface_count()));
-        Self::run_tool(cmd)
+        Self::run_tool(cmd)?;
+        self.verified_init_pid()?;
+        Ok(())
     }
 
     /// How many `lxc.net.N` interfaces the container's config declares.
@@ -515,7 +688,14 @@ impl LxcContainer {
         _timeout_ms: u32,
     ) -> Result<(i32, String, String), String> {
         // TODO: Implement timeout and working directory support.
+        if self.is_running_checked()? {
+            return Err(format!(
+                "Container {} is already running; lxc-execute cannot apply capability restrictions",
+                self.name
+            ));
+        }
         let mut cmd = self.lxc_command("lxc-execute");
+        cmd.args(["-s", "lxc.cap.drop=sys_admin"]);
         cmd.args(["--", "/bin/sh", "-c", command]);
 
         let output = cmd
@@ -547,6 +727,7 @@ impl LxcContainer {
         // inner shell would ignore Ctrl-C.
         const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
 
+        self.verified_init_pid()?;
         let mut cmd = self.lxc_command("lxc-attach");
         cmd.args(build_attach_args_with_env_control(
             env,
@@ -607,6 +788,7 @@ impl LxcContainer {
         use crate::mxc_common::sandbox_process::{wait_with_timeout, StreamCloser, WaitError};
         use std::process::Stdio;
 
+        self.verified_init_pid()?;
         let mut cmd = self.lxc_command("lxc-attach");
         cmd.args(build_attach_args_with_env_control(
             env,
@@ -705,7 +887,7 @@ impl LxcContainer {
         use std::process::Stdio;
 
         let mut cmd =
-            self.attach_command(command, working_directory, env, force_clear_env, firewall);
+            self.attach_command(command, working_directory, env, force_clear_env, firewall)?;
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -730,7 +912,7 @@ impl LxcContainer {
         const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
 
         let mut cmd =
-            self.attach_command(command, working_directory, env, force_clear_env, firewall);
+            self.attach_command(command, working_directory, env, force_clear_env, firewall)?;
         let pty = crate::mxc_pty::LivePty::attach_forwarded(&mut cmd, size, UNBLOCK)
             .map_err(|error| format!("Failed to allocate lxc-attach PTY: {error}"))?;
         let mut child = cmd
@@ -787,7 +969,8 @@ impl LxcContainer {
         env: &[String],
         force_clear_env: bool,
         firewall: ContainerFirewall,
-    ) -> std::process::Command {
+    ) -> Result<std::process::Command, String> {
+        self.verified_init_pid()?;
         let mut cmd = self.lxc_command("lxc-attach");
         cmd.args(build_attach_args_with_env_control(
             env,
@@ -798,7 +981,7 @@ impl LxcContainer {
         if firewall == ContainerFirewall::Installed {
             confine_network_capabilities(&mut cmd);
         }
-        cmd
+        Ok(cmd)
     }
 
     /// Stub for the workspace-wide clippy lane that runs on Windows.
@@ -855,6 +1038,10 @@ impl LxcContainer {
         }
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "lxc_capability_spec.rs"]
+mod capability_spec;
 
 #[cfg(test)]
 mod tests {

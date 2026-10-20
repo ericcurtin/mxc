@@ -62,6 +62,22 @@ itself an IPv6 address, never receives a lease, and the run fails:
 sudo firewall-cmd --zone=<ZONE> --change-interface=lxcbr0
 ```
 
+## Workload privileges
+
+MXC starts LXC workloads without `CAP_SYS_ADMIN`, even when no filesystem or
+network policy is supplied.  Mount administration in the container's original
+user namespace is unavailable, including remounting `/proc/sys` read-write.
+Programs that need this authority are not supported.
+
+This does not change the workload's user ID or configure an unprivileged
+container.  Ordinary writes to writable files still work.  Dropping this
+capability alone is not a complete filesystem sandbox.
+
+MXC refuses attachment if the running container retains `CAP_SYS_ADMIN` or its
+capability state cannot be verified.  Existing native `lxc.cap.drop` entries
+remain in force.  A nonempty native `lxc.cap.keep` conflicts with the mandatory
+drop and fails startup.
+
 ## Configuration
 
 Note the required field lxc.

@@ -518,7 +518,16 @@ impl LxcScriptRunner {
 
         // LXC reads the network section only at start.  A container an earlier
         // run left running is still on that run's topology.
-        if container.is_running() {
+        let running = match container.is_running_checked() {
+            Ok(running) => running,
+            Err(e) => {
+                self.release_after_failure(&container, container_created, logger);
+                return Err(ScriptResponse::error(&format!(
+                    "Failed to inspect container state before applying restrictions: {e}"
+                )));
+            }
+        };
+        if running {
             let _ = writeln!(
                 logger,
                 "Container already running; stopping it so this run's network policy applies."
@@ -549,9 +558,7 @@ impl LxcScriptRunner {
 
         let _ = writeln!(logger, "Starting LXC container...");
         if let Err(e) = container.start(network) {
-            if self.destroy_on_exit || container_created {
-                let _ = container.destroy();
-            }
+            self.release_after_failure(&container, container_created, logger);
             return Err(ScriptResponse::error(&format!(
                 "Failed to start container: {}",
                 e
@@ -581,7 +588,15 @@ impl LxcScriptRunner {
         }
 
         // The init PID names the container's network namespace.
-        let netns_pid = container.init_pid();
+        let netns_pid = match container.verified_init_pid() {
+            Ok(pid) => Some(pid),
+            Err(e) => {
+                self.release_after_failure(&container, container_created, logger);
+                return Err(ScriptResponse::error(&format!(
+                    "Failed to verify container capability restrictions: {e}"
+                )));
+            }
+        };
         let hook_point = self.enforce_netns_discovery(
             netns_pid,
             plan.installs_firewall(),
