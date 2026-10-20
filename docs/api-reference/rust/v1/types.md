@@ -151,7 +151,8 @@ its typed configuration; the native engine validates backend and policy support.
 
 Experimental MicroVM creation selects `Containment::MicroVm { image: String }`.
 `image` is a required nonblank registry image reference resolved by the NVX
-runtime. Use only with `v1::experimental::run`; the published V1 contract target
+runtime. Use `v1::experimental::run` for captured execution or
+`v1::experimental::spawn` for live execution; the published V1 contract target
 is unchanged.
 
 ```rust

@@ -15,7 +15,8 @@ Experimental Windows x64 MicroVM captured execution uses
 `v1::experimental::run(request: ContainerRequest, options: RunOptions) -> Result<ExecutionResult, Error>`.
 It requires the `microvm` build feature and
 `Containment::MicroVm { image: String }`. Stable operations do not authorize
-MicroVM. There is no experimental streaming or MicroVM lifecycle API.
+MicroVM. Live execution uses `v1::experimental::spawn`, and container lifecycle
+operations use `v1::experimental::container`, as described below.
 
 | Output | Create and run a container | Run in an existing container | Result |
 |---|---|---|---|

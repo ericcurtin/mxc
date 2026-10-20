@@ -249,7 +249,7 @@ mod windows_x64 {
             );
         }
 
-        // Phase 3 accepts these capability-aware policies. With the signed bundle deliberately
+        // These capability-aware policies are accepted. With the signed bundle deliberately
         // unavailable, each request must pass contract validation and stop at backend discovery.
         for (label, patch) in capability_requests() {
             let request = request_with_patch(patch);
@@ -261,7 +261,7 @@ mod windows_x64 {
             );
             assert!(error.message.contains("NVX"), "{label}: {error:?}");
             println!(
-                "HOST_ONLY accepted Phase 3 {label} through bundle discovery: {}",
+                "HOST_ONLY accepted {label} through bundle discovery: {}",
                 error.message
             );
         }
@@ -349,7 +349,7 @@ mod windows_x64 {
             println!("HOST_ONLY executor rejected {label}: {stderr}");
         }
 
-        // The executor remains captured create-and-run, but Phase 3 capability-aware policy is
+        // The executor remains captured create-and-run, but capability-aware policy is
         // valid and therefore advances to the deliberately unavailable signed-bundle boundary.
         for (label, patch) in capability_requests() {
             let output = executor_output(&request_with_patch(patch), true);
@@ -360,7 +360,7 @@ mod windows_x64 {
                 "{label} did not reach bundle discovery: {stderr}"
             );
             assert!(!String::from_utf8_lossy(&output.stdout).contains("forbidden"));
-            println!("HOST_ONLY executor accepted Phase 3 {label}: {stderr}");
+            println!("HOST_ONLY executor accepted {label}: {stderr}");
         }
     }
 

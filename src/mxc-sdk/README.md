@@ -207,8 +207,8 @@ Distribute the complete `aci-edge-sandboxes/` directory beside the consuming
 executable. The native agent materializes the caller-selected image on the host;
 this does not grant guest network access. There is no Azure Linux fallback.
 References are cached by text; prefer a digest when immutable content matters.
-See the [NVX backend guide](https://github.com/microsoft/mxc/blob/main/docs/backends/nanvix/nanvix.md)
-for release pins, attestations and host prerequisites.
+The host requires Windows Hypervisor Platform and hardware virtualization.
+The complete signed bundle must match the pinned runtime's manifests and assets.
 
 Backend implementations, shared runtime support, backend dispatch, and host
 probing are internal modules of this published crate. The crate root exposes
