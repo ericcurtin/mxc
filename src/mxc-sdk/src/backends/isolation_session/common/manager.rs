@@ -582,7 +582,7 @@ impl IsolationSessionManager {
 
             let outcome = started.wait(options.timeout_ms)?;
             scope.stop_stdin();
-            scope.finish();
+            scope.finish()?;
 
             Ok(match outcome {
                 ExecOutcome::Exited(exit_code) => exit_code,
@@ -1091,14 +1091,15 @@ impl<'a> RelayScope<'a> {
     }
 
     /// Teardown for a workload that has already exited.
-    fn finish(&mut self) {
+    fn finish(&mut self) -> Result<(), IsolationSessionError> {
         self.signal_stop();
         let output_relays = self.output_relays();
         let output_drain = drain_output_relays_within(
             &output_relays,
             Duration::from_millis(Self::IDLE_MS),
             Duration::from_millis(Self::ABSOLUTE_CAP_MS),
-        );
+        )
+        .map_err(|error| lifecycle_err(format!("drain output relays: {error}")))?;
         if output_drain == OutputRelayDrain::GaveUp {
             Self::join_output(&self.stdout, Self::JOIN_MS);
             Self::join_output(&self.stderr, Self::JOIN_MS);
@@ -1106,6 +1107,7 @@ impl<'a> RelayScope<'a> {
         Self::join(self.stdin.as_ref(), Self::JOIN_MS);
         self.close_handles();
         self.finished = true;
+        Ok(())
     }
 }
 

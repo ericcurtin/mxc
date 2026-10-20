@@ -23,7 +23,9 @@ use crate::mxc_common::error::WxcError;
 use crate::mxc_common::process_util::{InterruptiblePipeReader, OwnedHandle, PipeReadCanceller};
 use crate::mxc_common::sandbox_process::StreamCloser;
 
-use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{
+    DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows::Win32::Storage::FileSystem::{FlushFileBuffers, ReadFile, WriteFile};
 use windows::Win32::System::Threading::{
     CreateThread, GetCurrentProcess, WaitForMultipleObjects, WaitForSingleObject,
@@ -188,18 +190,19 @@ pub(super) fn drain_output_relays_within(
     relays: &[&PipeRelay],
     idle_window: Duration,
     absolute_cap: Duration,
-) -> OutputRelayDrain {
+) -> Result<OutputRelayDrain, WxcError> {
     if relays.is_empty() || relays.iter().all(|relay| relay_is_finished(relay)) {
-        return OutputRelayDrain::Drained;
+        return Ok(OutputRelayDrain::Drained);
     }
 
+    let handles: Vec<HANDLE> = relays.iter().map(|relay| relay.thread().get()).collect();
     let started = Instant::now();
     let mut idle_started = started;
     let mut last_progress = total_progress(relays);
 
     loop {
         if relays.iter().all(|relay| relay_is_finished(relay)) {
-            return OutputRelayDrain::Drained;
+            return Ok(OutputRelayDrain::Drained);
         }
 
         let now = Instant::now();
@@ -215,16 +218,22 @@ pub(super) fn drain_output_relays_within(
             for relay in relays {
                 relay.cancel_read();
             }
-            return OutputRelayDrain::GaveUp;
+            return Ok(OutputRelayDrain::GaveUp);
         }
 
         let remaining_idle = idle_window.saturating_sub(idle_elapsed);
         let remaining_cap = absolute_cap.saturating_sub(total_elapsed);
-        let sleep_for = DRAIN_POLL_INTERVAL.min(remaining_idle).min(remaining_cap);
-        if sleep_for.is_zero() {
-            std::thread::yield_now();
-        } else {
-            std::thread::sleep(sleep_for);
+        let wait_for = DRAIN_POLL_INTERVAL.min(remaining_idle).min(remaining_cap);
+        // SAFETY: relays own all handles throughout the wait. The timeout is at most 200 ms.
+        match unsafe { WaitForMultipleObjects(&handles, true, wait_for.as_millis() as u32) } {
+            WAIT_OBJECT_0 => return Ok(OutputRelayDrain::Drained),
+            WAIT_TIMEOUT => {}
+            _ => {
+                return Err(WxcError::Process(format!(
+                    "WaitForMultipleObjects for output relays failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
         }
     }
 }
@@ -703,6 +712,76 @@ mod tests {
     }
 
     #[test]
+    fn output_drain_wakes_when_all_relays_exit_between_polls() {
+        let (first_read, first_write) = create_test_pipes();
+        let (second_read, mut second_write) = create_test_pipes();
+        let (_destination_read, destination_write) = create_test_pipes();
+        let first =
+            unsafe { create_relay_thread(first_read.get(), destination_write.get()).unwrap() };
+        let second =
+            unsafe { create_relay_thread(second_read.get(), destination_write.get()).unwrap() };
+        drop(first_write);
+        assert_eq!(
+            unsafe { WaitForSingleObject(first.thread().get(), 1000) },
+            WAIT_OBJECT_0
+        );
+
+        let source = SendOwnedHandle::take(&mut second_write);
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            drop(source);
+        });
+        let started = Instant::now();
+        let result = drain_output_relays_within(
+            &[&first, &second],
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        let second_finished = unsafe { WaitForSingleObject(second.thread().get(), 0) };
+        writer.join().unwrap();
+
+        assert_eq!(result, OutputRelayDrain::Drained);
+        assert_eq!(second_finished, WAIT_OBJECT_0, "must wait for both relays");
+        assert!(
+            elapsed < DRAIN_POLL_INTERVAL,
+            "completion should wake the drain before the next poll: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn output_drain_without_relays_finishes_immediately() {
+        assert_eq!(
+            drain_output_relays_within(&[], Duration::ZERO, Duration::ZERO).unwrap(),
+            OutputRelayDrain::Drained
+        );
+    }
+
+    #[test]
+    fn output_drain_reports_a_failed_thread_wait() {
+        let (source_read, _source_write) = create_test_pipes();
+        let (_destination_read, destination_write) = create_test_pipes();
+        let mut relay =
+            unsafe { create_relay_thread(source_read.get(), destination_write.get()).unwrap() };
+        let thread = std::mem::replace(&mut relay.thread, OwnedHandle::new(HANDLE::default()));
+        let result =
+            drain_output_relays_within(&[&relay], Duration::from_secs(1), Duration::from_secs(2));
+        relay.cancel_read();
+        assert_eq!(
+            unsafe { WaitForSingleObject(thread.get(), 1000) },
+            WAIT_OBJECT_0
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("WaitForMultipleObjects"),
+            "wait failures must not be reported as successful draining"
+        );
+    }
+
+    #[test]
     fn output_drain_extends_while_progress_continues() {
         let (source_read, mut source_write) = create_test_pipes();
         let (mut dest_read, dest_write) = create_test_pipes();
@@ -734,7 +813,8 @@ mod tests {
             &[&relay],
             std::time::Duration::from_millis(100),
             std::time::Duration::from_secs(2),
-        );
+        )
+        .unwrap();
         let elapsed = started.elapsed();
 
         writer.join().unwrap();
@@ -762,7 +842,8 @@ mod tests {
             &[&relay],
             std::time::Duration::from_millis(30),
             std::time::Duration::from_millis(500),
-        );
+        )
+        .unwrap();
         let elapsed = started.elapsed();
 
         assert_eq!(result, OutputRelayDrain::GaveUp);
@@ -833,7 +914,8 @@ mod tests {
 
         let cap = Duration::from_millis(600);
         let started = Instant::now();
-        let result = drain_output_relays_within(&[&relay], Duration::from_millis(300), cap);
+        let result =
+            drain_output_relays_within(&[&relay], Duration::from_millis(300), cap).unwrap();
         let elapsed = started.elapsed();
         assert_eq!(
             unsafe { WaitForSingleObject(relay.thread().get(), 5000) },
