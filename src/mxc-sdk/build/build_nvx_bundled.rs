@@ -234,6 +234,7 @@ fn copy_bundle(source: &Path, target: &Path) {
 }
 
 fn assert_safe_directory(path: &Path, description: &str) {
+    assert_safe_ancestors(path, description, false);
     let metadata = std::fs::symlink_metadata(path)
         .unwrap_or_else(|error| panic!("cannot inspect {description} {}: {error}", path.display()));
     assert!(
@@ -241,26 +242,33 @@ fn assert_safe_directory(path: &Path, description: &str) {
         "{description} must be a directory: {}",
         path.display()
     );
-    assert!(
-        !metadata.file_type().is_symlink() && !is_reparse_point(&metadata),
-        "{description} must not be a link or reparse point: {}",
-        path.display()
-    );
 }
 
 fn assert_safe_destination(target: &Path) {
-    for path in target.ancestors() {
+    assert_safe_ancestors(target, "NVX bundle destination", true);
+}
+
+fn assert_safe_ancestors(target: &Path, description: &str, allow_missing: bool) {
+    let absolute = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|error| panic!("cannot resolve {description}: {error}"))
+            .join(target)
+    };
+    // Inspect parents first, without resolving links in the untrusted path.
+    let ancestors: Vec<_> = absolute.ancestors().collect();
+    for path in ancestors.into_iter().rev() {
         let metadata = match std::fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => panic!(
-                "cannot inspect NVX bundle destination {}: {error}",
-                path.display()
-            ),
+            Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+                continue;
+            }
+            Err(error) => panic!("cannot inspect {description} {}: {error}", path.display()),
         };
         assert!(
             !metadata.file_type().is_symlink() && !is_reparse_point(&metadata),
-            "NVX bundle destination must not traverse a link or reparse point: {}",
+            "{description} must not traverse a link or reparse point: {}",
             path.display()
         );
     }
@@ -317,6 +325,92 @@ mod tests {
         }
     }
 
+    fn assert_source_link_rejected(action: impl FnOnce() + std::panic::UnwindSafe, link: &Path) {
+        let error = std::panic::catch_unwind(action).expect_err("source link must be rejected");
+        let message = error
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| error.downcast_ref::<&str>().copied())
+            .expect("source rejection message");
+        assert!(
+            message.contains("NVX bundle source must not traverse a link or reparse point"),
+            "{message}"
+        );
+        assert!(message.contains(&link.display().to_string()), "{message}");
+    }
+
+    fn check_linked_source_parent(create_link: impl FnOnce(&Path, &Path) -> std::io::Result<()>) {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp
+            .path()
+            .canonicalize()
+            .expect("canonical temporary root");
+        let parent = root.join("parent");
+        let source = parent.join("bundle");
+        let linked_parent = root.join("linked-parent");
+        let destination = root.join("destination");
+        std::fs::create_dir_all(&source).expect("source directory");
+        std::fs::create_dir(&destination).expect("destination directory");
+        std::fs::write(source.join("file"), b"approved contents").expect("source file");
+        let sentinel = destination.join("sentinel");
+        std::fs::write(&sentinel, b"owned sentinel").expect("destination sentinel");
+        let expected_digest = sha256(&source.join("file"));
+        let expected = [("file", expected_digest.as_str())];
+        verify_bundle_against(&source, &expected);
+        let positive_destination = root.join("positive-destination");
+        copy_bundle(&source, &positive_destination);
+        verify_bundle_against(&positive_destination, &expected);
+
+        if !link_created_or_skipped(
+            create_link(&parent, &linked_parent),
+            "linked source ancestor rejection",
+        ) {
+            return;
+        }
+        let linked_source = linked_parent.join("bundle");
+        assert!(!std::fs::symlink_metadata(&linked_source)
+            .expect("ordinary bundle under linked parent")
+            .file_type()
+            .is_symlink());
+        assert_source_link_rejected(
+            || verify_bundle_against(&linked_source, &expected),
+            &linked_parent,
+        );
+        assert_source_link_rejected(|| copy_bundle(&linked_source, &destination), &linked_parent);
+        assert_eq!(
+            std::fs::read(&sentinel).expect("unchanged sentinel"),
+            b"owned sentinel"
+        );
+        let entries: Vec<_> = std::fs::read_dir(&destination)
+            .expect("destination tree")
+            .map(|entry| entry.expect("destination entry").file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("sentinel")]);
+        verify_bundle_against(&source, &expected);
+    }
+
+    #[test]
+    fn rejects_linked_source_ancestor_before_reading_or_writing() {
+        check_linked_source_parent(create_directory_link);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_junction_source_ancestor_before_reading_or_writing() {
+        check_linked_source_parent(|original, link| {
+            let output = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(link)
+                .arg(original)
+                .output()?;
+            assert!(
+                output.status.success(),
+                "junction creation failed: {output:?}"
+            );
+            Ok(())
+        });
+    }
+
     #[test]
     fn rejects_linked_source_root_when_supported() {
         let temp = tempfile::tempdir().expect("temporary directory");
@@ -339,8 +433,15 @@ mod tests {
             return;
         }
 
+        assert_source_link_rejected(
+            || verify_bundle_against(&linked_source, &expected),
+            &linked_source,
+        );
+        let destination = root.join("destination");
+        assert_source_link_rejected(|| copy_bundle(&linked_source, &destination), &linked_source);
         assert!(
-            std::panic::catch_unwind(|| verify_bundle_against(&linked_source, &expected)).is_err()
+            !destination.exists(),
+            "source rejection precedes destination creation"
         );
     }
 

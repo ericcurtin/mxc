@@ -164,8 +164,7 @@ pub(crate) fn execute_one_shot_request(
     if request.containment == ContainmentBackend::MicroVm {
         #[cfg(all(target_os = "windows", target_arch = "x86_64", feature = "microvm"))]
         {
-            return run_captured_execution_request(&request, logger)
-                .map(OneShotExecution::Captured);
+            return run_captured_execution_request(request, logger).map(OneShotExecution::Captured);
         }
         #[cfg(not(all(target_os = "windows", target_arch = "x86_64", feature = "microvm")))]
         {
@@ -175,7 +174,7 @@ pub(crate) fn execute_one_shot_request(
         }
     }
 
-    spawn_execution_request_with_logger(&request, logger).map(OneShotExecution::Streaming)
+    spawn_execution_request_with_logger(request, logger).map(OneShotExecution::Streaming)
 }
 
 fn parse_one_shot_json(

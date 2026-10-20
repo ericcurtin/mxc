@@ -393,6 +393,125 @@ mod tests {
         capabilities
     }
 
+    fn typed_network_rules_request() -> ExecutionRequest {
+        use crate::v1::{
+            ContainerRequest, Containment, NetworkEgressPolicy, NetworkPeerPolicy, NetworkPolicy,
+            NetworkPortPolicy, NetworkProtocol, NetworkRulePolicy,
+        };
+
+        let request = ContainerRequest {
+            containment: Containment::MicroVm {
+                image: "python:3.12-alpine".to_owned(),
+            },
+            network: Some(NetworkPolicy {
+                egress: Some(NetworkEgressPolicy {
+                    allow: Some(vec![
+                        NetworkRulePolicy {
+                            to: Some(vec![NetworkPeerPolicy {
+                                cidr: "10.0.0.0/8".to_owned(),
+                                except: Some(vec!["10.1.0.0/16".to_owned()]),
+                            }]),
+                            ports: Some(vec![
+                                NetworkPortPolicy {
+                                    protocol: Some(NetworkProtocol::Tcp),
+                                    port: Some(8000),
+                                    end_port: Some(8080),
+                                },
+                                NetworkPortPolicy {
+                                    protocol: Some(NetworkProtocol::Udp),
+                                    port: Some(53),
+                                    end_port: None,
+                                },
+                                NetworkPortPolicy {
+                                    protocol: Some(NetworkProtocol::Any),
+                                    ..Default::default()
+                                },
+                            ]),
+                        },
+                        NetworkRulePolicy {
+                            to: Some(vec![NetworkPeerPolicy::new("2001:db8::/32")]),
+                            ports: None,
+                        },
+                    ]),
+                    deny: Some(vec![NetworkRulePolicy {
+                        to: Some(vec![NetworkPeerPolicy::new("192.0.2.0/24")]),
+                        ports: Some(vec![NetworkPortPolicy {
+                            protocol: Some(NetworkProtocol::Icmp),
+                            ..Default::default()
+                        }]),
+                    }]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..ContainerRequest::new("printf captured")
+        };
+        crate::policy::prepare_creation_request(&request, None)
+            .expect("typed nonempty rules pass development contract and shared parser")
+            .inner
+    }
+
+    #[test]
+    fn typed_network_rules_reach_provision_with_exact_selectors() {
+        let request = typed_network_rules_request();
+        let (provision, _) = provision_request(&request, &capabilities()).unwrap();
+        let network = provision.network.expect("network policy");
+        assert_eq!(network.egress.default, Access::Deny);
+        assert_eq!(network.egress.allow.len(), 2);
+        assert_eq!(network.egress.deny.len(), 1);
+        let allow = &network.egress.allow[0];
+        assert_eq!(allow.to.len(), 1);
+        assert_eq!(allow.to[0].cidr, "10.0.0.0/8");
+        assert_eq!(allow.to[0].except, vec!["10.1.0.0/16"]);
+        assert_eq!(allow.ports.len(), 3);
+        for (actual, (protocol, port, end_port)) in allow.ports.iter().zip([
+            (Protocol::Tcp, Some(8000), Some(8080)),
+            (Protocol::Udp, Some(53), None),
+            (Protocol::Any, None, None),
+        ]) {
+            assert_eq!(actual.protocol, protocol);
+            assert_eq!(actual.port, port);
+            assert_eq!(actual.end_port, end_port);
+        }
+        let omitted_ports = &network.egress.allow[1];
+        assert_eq!(omitted_ports.to.len(), 1);
+        assert_eq!(omitted_ports.to[0].cidr, "2001:db8::/32");
+        assert!(omitted_ports.to[0].except.is_empty());
+        assert!(omitted_ports.ports.is_empty());
+        let deny = &network.egress.deny[0];
+        assert_eq!(deny.to.len(), 1);
+        assert_eq!(deny.to[0].cidr, "192.0.2.0/24");
+        assert!(deny.to[0].except.is_empty());
+        assert_eq!(deny.ports.len(), 1);
+        assert_eq!(deny.ports[0].protocol, Protocol::Icmp);
+        assert_eq!(deny.ports[0].port, None);
+        assert_eq!(deny.ports[0].end_port, None);
+    }
+
+    #[test]
+    fn typed_network_rules_require_the_advertised_egress_rules_capability() {
+        for (keep_allow, keep_deny) in [(true, true), (true, false), (false, true)] {
+            let mut request = typed_network_rules_request();
+            let egress = request.policy.network_egress.as_mut().unwrap();
+            if !keep_allow {
+                egress.allow.clear();
+            }
+            if !keep_deny {
+                egress.deny.clear();
+            }
+            let mut capabilities = capabilities();
+            // Reach the mapper before removing only the rules capability.
+            assert!(provision_request(&request, &capabilities).is_ok());
+            capabilities.network.egress_rules = false;
+            let error = provision_request(&request, &capabilities).unwrap_err();
+            assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+            assert_eq!(
+                error.message,
+                "the configured NVX runtime does not support network egress rules"
+            );
+        }
+    }
+
     #[test]
     fn creation_rejects_missing_invalid_or_unsupported_image() {
         let mut request = request();
