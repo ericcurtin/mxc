@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `spawnWithPty` supports ProcessContainer requests.
+- `spawnInContainer` exposes `standardInput` for a WSLC container. Ending it
+  gives the command end-of-file; a command that reads stdin now waits for that
+  instead of seeing end-of-file at once. `wait()` and `runInContainer` still
+  end an untaken stdin.
 
 ### Changed
 

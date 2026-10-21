@@ -41,8 +41,9 @@ use serde::Serialize;
 use crate::wslc_common::container_steps::OutStream;
 use crate::wslc_common::daemon_protocol::{
     encode_frame, CancelExecConfig, DaemonRequest, DaemonResponse, DeprovisionConfig,
-    DeprovisionSessionConfig, ErrKind, ExecConfig, ExecTerminal, ProvisionConfig,
-    ProvisionSessionConfig, StartConfig, StopConfig, StreamFrame, MAX_FRAME_SIZE, PROTOCOL_VERSION,
+    DeprovisionSessionConfig, ErrKind, ExecConfig, ExecStdinConfig, ExecTerminal, ProvisionConfig,
+    ProvisionSessionConfig, StartConfig, StopConfig, StreamFrame, MAX_FRAME_SIZE,
+    MAX_STDIN_CHUNK_BYTES, PROTOCOL_VERSION,
 };
 use crate::wslc_common::daemon_record::{live_daemon, DaemonRecord, TransitionLock};
 
@@ -486,6 +487,51 @@ impl DaemonClient {
             exec_id,
             run_token,
         }))?)
+    }
+
+    /// Copy `input` into an admitted exec's stdin over a connection of its own,
+    /// ending with end-of-file, or stop early once the run is over.
+    pub(crate) fn forward_stdin(
+        &self,
+        exec_id: String,
+        run_token: String,
+        mut input: impl Read,
+    ) -> DaemonResult<()> {
+        let mut pipe = self.open_pipe()?;
+        write_frame(
+            &mut pipe,
+            &DaemonRequest::ExecStdin(ExecStdinConfig { exec_id, run_token }),
+        )?;
+        let (mut pipe, response) = read_frame_with_deadline(
+            move || {
+                let response = read_frame::<DaemonResponse>(&mut pipe)?;
+                Ok((pipe, response))
+            },
+            call_timeout(),
+        )?;
+        expect_ok(response)?;
+
+        let mut buf = vec![0u8; MAX_STDIN_CHUNK_BYTES];
+        loop {
+            let read = match input.read(&mut buf) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    return Err(DaemonError::transport(format!(
+                        "reading the exec's stdin failed: {error}"
+                    )))
+                }
+            };
+            let chunk = StreamFrame::Stdin {
+                data: buf[..read].to_vec(),
+            };
+            if write_frame(&mut pipe, &chunk).is_err() {
+                return Ok(());
+            }
+        }
+        let _ = write_frame(&mut pipe, &StreamFrame::Stdin { data: Vec::new() });
+        Ok(())
     }
 
     /// Issue a single non-streaming request on a fresh connection and return the

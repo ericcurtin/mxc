@@ -52,8 +52,10 @@
 //!
 //! WSLC requires the crate's `wslc` build feature, and IsolationSession
 //! requires the `isolation_session` build feature. MXC does not forward stdin
-//! to a WSLC container, so
-//! [`MxcProcess::take_stdin`] returns `None` for it.
+//! to a WSLC container created by [`v1::spawn`], so
+//! [`MxcProcess::take_stdin`] returns `None` for it; a process started in a
+//! provisioned WSLC container by [`v1::container::spawn_in_container`] does
+//! take stdin.
 //! IsolationSession is also available through the typed lifecycle API.
 //!
 //! The `wslc` feature stages `wslcsdk.dll` into the cargo profile directory,
@@ -119,7 +121,8 @@
 //! [`v1::container::spawn_in_container_with_pty`]. [`v1::run`] captures both output streams. With
 //! [`v1::spawn`] or [`v1::container::spawn_in_container`], callers
 //! can take the streams from [`MxcProcess`] or let `wait` drain and discard any
-//! stream they did not take. WSLC does not expose stdin.
+//! stream they did not take. WSLC exposes stdin only for
+//! [`v1::container::spawn_in_container`].
 //!
 //! [`v1::spawn_with_pty`] allocates a caller-controlled PTY for create-and-run
 //! execution on supported backends, including IsolationSession, Bubblewrap, LXC,
@@ -433,8 +436,8 @@ pub mod __ffi {
     /// `sandboxId` identifying a started container). No pty is allocated.
     ///
     /// IsolationSession and WSLC serve this with the crate's corresponding
-    /// `isolation_session` or `wslc` feature. WSLC returns separate stdout/stderr
-    /// pipes but no stdin. Windows Sandbox cannot hand back pipes and refuses.
+    /// `isolation_session` or `wslc` feature. WSLC returns separate stdin,
+    /// stdout, and stderr pipes. Windows Sandbox cannot hand back pipes and refuses.
     /// `experimental` opts in to experimental backends, as for
     /// [`run_lifecycle_json`].
     ///

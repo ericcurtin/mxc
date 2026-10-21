@@ -331,6 +331,56 @@ function Start-StateAware {
     }
 }
 
+# Start an exec whose stdin the caller controls. Without -StdinFile the handle's
+# Stdin is a writable stream the caller writes and closes; with it, cmd.exe
+# redirects the file (or NUL) onto stdin, as `wxc-exec ... < file` would.
+# Complete it with Wait-StateAware.
+function Start-StateAwareWithStdin {
+    param(
+        [hashtable]$Request,
+        [string]$StdinFile
+    )
+
+    $invocation = ConvertTo-StateAwareInvocation -Request $Request
+    $argList = @('--operation', $invocation.Operation, $invocation.TargetFlag, $invocation.TargetId)
+    if ($Debug) { $argList += '--debug' }
+    $argList += @('--config-base64', $invocation.ConfigBase64)
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    if ($StdinFile) {
+        $psi.FileName = $env:ComSpec
+        $quoted = ($argList | ForEach-Object { "`"$_`"" }) -join ' '
+        $psi.Arguments = "/d /s /c `"`"$WxcExec`" $quoted < `"$StdinFile`"`""
+    } else {
+        $psi.FileName = $WxcExec
+        foreach ($a in $argList) { $psi.ArgumentList.Add($a) }
+        $psi.RedirectStandardInput = $true
+    }
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    $proc = [System.Diagnostics.Process]::new()
+    $proc.StartInfo = $psi
+    $null = $proc.Start()
+
+    @{
+        Process    = $proc
+        Stdin      = if ($StdinFile) { $null } else { $proc.StandardInput.BaseStream }
+        StdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        StderrTask = $proc.StandardError.ReadToEndAsync()
+        StartedAt  = [DateTime]::UtcNow
+    }
+}
+
+# Close a Start-StateAwareWithStdin handle's stdin, tolerating a pipe the
+# executor already closed by exiting.
+function Close-StateAwareStdin {
+    param([hashtable]$Handle)
+    try { $Handle.Stdin.Close() } catch { }
+}
+
 # Complete a Start-StateAware handle. Returns
 # @{ ExitCode; Stdout; Stderr; StartedAt; EndedAt } with UTC timestamps.
 function Wait-StateAware {
@@ -1966,6 +2016,177 @@ try {
     if ($null -ne $script:ccSandboxB -and -not $ccBDeprovisionedOk) {
         try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:ccSandboxB } catch { }
     }
+}
+
+# ---------------- Lifecycle S: stdin forwarding ----------------
+
+# The executor forwards its own stdin when it is not a terminal. Two sandboxes,
+# so a stdin flood into one can be shown not to hold up an exec in the other.
+$script:inSandbox = $null
+$script:inPeer = $null
+$inDeprovisionedOk = $false
+$inPeerDeprovisionedOk = $false
+$script:inTestRoot = Join-Path $env:TEMP "mxc_wslc_sa_stdin_$PID"
+try {
+    $inReady = $false
+    $inPeerReady = $false
+    $inProvOk = Run-StateAwareTest "S: provision stdin sandbox" {
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
+        $envObj = Assert-ResultEnvelope $r "stdin provision"
+        if ($envObj) { $script:inSandbox = [string]$envObj.result.sandboxId }
+    }
+    $inPeerProvOk = Run-StateAwareTest "S: provision peer sandbox" {
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
+        $envObj = Assert-ResultEnvelope $r "stdin peer provision"
+        if ($envObj) { $script:inPeer = [string]$envObj.result.sandboxId }
+    }
+    if ($inProvOk) {
+        $inReady = Run-StateAwareTest "S: start stdin sandbox" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:inSandbox
+            $null = Assert-ResultEnvelope $r "stdin start"
+        }
+    }
+    if ($inPeerProvOk) {
+        $inPeerReady = Run-StateAwareTest "S: start peer sandbox" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:inPeer
+            $null = Assert-ResultEnvelope $r "stdin peer start"
+        }
+    }
+    $null = New-Item -ItemType Directory -Force -Path $script:inTestRoot
+
+    if ($inReady) {
+        Run-StateAwareTest "S: piped host stdin reaches the command" {
+            $req = @{ phase = 'exec'; sandboxId = $script:inSandbox; process = @{ commandLine = 'cat'; timeout = 60000 } }
+            $h = Start-StateAwareWithStdin -Request $req
+            $payload = [System.Text.Encoding]::UTF8.GetBytes("PIPED-STDIN-LINE`n")
+            $h.Stdin.Write($payload, 0, $payload.Length)
+            Close-StateAwareStdin $h
+            $r = Wait-StateAware $h
+            Assert-True ($r.ExitCode -eq 0) "cat exits 0 (stderr: $($r.Stderr.Trim()))"
+            Assert-True ($r.Stdout -match 'PIPED-STDIN-LINE') "cat echoed the piped input (got '$($r.Stdout.Trim())')"
+        } | Out-Null
+
+        Run-StateAwareTest "S: a redirected file reaches the command" {
+            $file = Join-Path $script:inTestRoot 'input.txt'
+            [System.IO.File]::WriteAllText($file, "FILE-STDIN-LINE-1`nFILE-STDIN-LINE-2`n")
+            $req = @{ phase = 'exec'; sandboxId = $script:inSandbox; process = @{ commandLine = 'wc -l'; timeout = 60000 } }
+            $r = Wait-StateAware (Start-StateAwareWithStdin -Request $req -StdinFile $file)
+            Assert-True ($r.ExitCode -eq 0) "wc exits 0 (stderr: $($r.Stderr.Trim()))"
+            Assert-True ($r.Stdout.Trim() -eq '2') "wc counted the file's two lines (got '$($r.Stdout.Trim())')"
+        } | Out-Null
+
+        Run-StateAwareTest "S: every byte value arrives unchanged" {
+            $bytes = [byte[]]::new(1024 * 1024)
+            for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = [byte]($i % 256) }
+            $expected = ([System.Security.Cryptography.SHA256]::HashData($bytes) |
+                ForEach-Object { $_.ToString('x2') }) -join ''
+            $req = @{ phase = 'exec'; sandboxId = $script:inSandbox; process = @{ commandLine = 'sha256sum'; timeout = 60000 } }
+            $h = Start-StateAwareWithStdin -Request $req
+            $h.Stdin.Write($bytes, 0, $bytes.Length)
+            Close-StateAwareStdin $h
+            $r = Wait-StateAware $h
+            Assert-True ($r.ExitCode -eq 0) "sha256sum exits 0 (stderr: $($r.Stderr.Trim()))"
+            $actual = ($r.Stdout.Trim() -split '\s+')[0]
+            Assert-True ($actual -eq $expected) "1 MiB of every byte value hashes the same in the container ($actual vs $expected)"
+        } | Out-Null
+
+        Run-StateAwareTest "S: the command sees end-of-file only once host stdin closes" {
+            $req = @{ phase = 'exec'; sandboxId = $script:inSandbox; process = @{ commandLine = "sh -c 'cat; echo CAT-SAW-EOF'"; timeout = 60000 } }
+            $h = Start-StateAwareWithStdin -Request $req
+            $payload = [System.Text.Encoding]::UTF8.GetBytes("BEFORE-EOF`n")
+            $h.Stdin.Write($payload, 0, $payload.Length)
+            $h.Stdin.Flush()
+            $exitedEarly = $h.Process.WaitForExit(3000)
+            Assert-True (-not $exitedEarly) "the command is still reading while host stdin is open"
+            Close-StateAwareStdin $h
+            $r = Wait-StateAware $h
+            Assert-True ($r.ExitCode -eq 0) "the command exits 0 after end-of-file (stderr: $($r.Stderr.Trim()))"
+            Assert-True ($r.Stdout -match 'BEFORE-EOF') "input written before end-of-file arrived"
+            Assert-True ($r.Stdout -match 'CAT-SAW-EOF') "cat returned once host stdin closed"
+        } | Out-Null
+
+        Run-StateAwareTest "S: an empty stdin ends the command cleanly" {
+            $req = @{ phase = 'exec'; sandboxId = $script:inSandbox; process = @{ commandLine = 'wc -c'; timeout = 60000 } }
+            $r = Wait-StateAware (Start-StateAwareWithStdin -Request $req -StdinFile 'NUL')
+            Assert-True ($r.ExitCode -eq 0) "wc exits 0 (stderr: $($r.Stderr.Trim()))"
+            Assert-True ($r.Stdout.Trim() -eq '0') "wc read no bytes (got '$($r.Stdout.Trim())')"
+        } | Out-Null
+
+        Run-StateAwareTest "S: a host stdin that never closes does not hold up a command that ignores it" {
+            $req = @{ phase = 'exec'; sandboxId = $script:inSandbox; process = @{ commandLine = 'echo IGNORES-STDIN'; timeout = 60000 } }
+            $h = Start-StateAwareWithStdin -Request $req
+            $exited = $h.Process.WaitForExit(60000)
+            Assert-True $exited "the executor exited while its stdin was still open"
+            if (-not $exited) { try { $h.Process.Kill() } catch { } }
+            Close-StateAwareStdin $h
+            $r = Wait-StateAware $h
+            Assert-True ($r.ExitCode -eq 0) "the command exits 0 (stderr: $($r.Stderr.Trim()))"
+            Assert-True ($r.Stdout -match 'IGNORES-STDIN') "the command ran"
+        } | Out-Null
+
+        Run-StateAwareTest "S: a reader waiting on a stdin that never closes still times out" {
+            $req = @{ phase = 'exec'; sandboxId = $script:inSandbox; process = @{ commandLine = 'cat'; timeout = 3000 } }
+            $h = Start-StateAwareWithStdin -Request $req
+            $exited = $h.Process.WaitForExit(60000)
+            Assert-True $exited "the executor exited after the timeout"
+            if (-not $exited) { try { $h.Process.Kill() } catch { } }
+            Close-StateAwareStdin $h
+            $r = Wait-StateAware $h
+            Assert-True ($r.ExitCode -ne 0) "a timed-out exec exits non-zero"
+            Assert-True ($r.Stderr -match 'timed out') "the timeout is reported (stderr: $($r.Stderr.Trim()))"
+        } | Out-Null
+    }
+
+    if ($inReady -and $inPeerReady) {
+        Run-StateAwareTest "S: a stdin flood into a command that ignores it starves nothing" {
+            $flooded = @{ phase = 'exec'; sandboxId = $script:inSandbox; process = @{ commandLine = "sh -c 'sleep 8; echo FLOODED-DONE'"; timeout = 60000 } }
+            $h = Start-StateAwareWithStdin -Request $flooded
+            $flood = [byte[]]::new(32 * 1024 * 1024)
+            $writeTask = $h.Stdin.WriteAsync($flood, 0, $flood.Length)
+            Start-Sleep -Seconds 2
+
+            $peer = @{ phase = 'exec'; sandboxId = $script:inPeer; process = @{ commandLine = 'echo PEER-RAN'; timeout = 60000 } }
+            $watch = [System.Diagnostics.Stopwatch]::StartNew()
+            $rp = Invoke-StateAware -Request $peer
+            $watch.Stop()
+            Assert-True ($rp.ExitCode -eq 0) "the peer exec exits 0 (stderr: $($rp.Stderr.Trim()))"
+            Assert-True ($rp.Stdout -match 'PEER-RAN') "the peer exec ran"
+            Assert-True ($watch.Elapsed.TotalSeconds -lt 20) `
+                ("the peer exec finished in {0:N1}s while the flood was backed up" -f $watch.Elapsed.TotalSeconds)
+            Assert-True (-not $writeTask.IsCompleted) "the flood was still backed up behind the ignoring command"
+
+            # The WSLc SDK reports the exit of a process that left this much
+            # input unread about two minutes late.
+            $exited = $h.Process.WaitForExit(240000)
+            Assert-True $exited "the flooded exec finished instead of deadlocking"
+            if (-not $exited) { try { $h.Process.Kill() } catch { } }
+            try { $null = $writeTask.Wait(10000) } catch { }
+            Close-StateAwareStdin $h
+            $r = Wait-StateAware $h
+            Assert-True ($r.ExitCode -eq 0) "the flooded exec exits 0 (stderr: $($r.Stderr.Trim()))"
+            Assert-True ($r.Stdout -match 'FLOODED-DONE') "the flooded command ran to completion"
+        } | Out-Null
+    }
+
+    foreach ($entry in @(
+        @{ Name = 'stdin'; Id = $script:inSandbox; Var = 'inDeprovisionedOk' },
+        @{ Name = 'peer'; Id = $script:inPeer; Var = 'inPeerDeprovisionedOk' }
+    )) {
+        if ($null -eq $entry.Id) { continue }
+        $deprovOk = Run-StateAwareTest "S: deprovision $($entry.Name) sandbox" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $entry.Id
+            $null = Assert-ResultEnvelope $r "stdin $($entry.Name) deprovision"
+        }
+        if ($deprovOk) { Set-Variable -Name $entry.Var -Value $true }
+    }
+} finally {
+    if ($null -ne $script:inSandbox -and -not $inDeprovisionedOk) {
+        try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:inSandbox } catch { }
+    }
+    if ($null -ne $script:inPeer -and -not $inPeerDeprovisionedOk) {
+        try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:inPeer } catch { }
+    }
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $script:inTestRoot
 }
 
 # ---------------- Lifecycle K: explicit sessions ----------------

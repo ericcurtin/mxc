@@ -351,6 +351,9 @@ public static class MxcLifecycle
             .ConfigureAwait(false);
         try
         {
+            // The caller has no way to write input here, so the command gets
+            // end-of-file rather than waiting for input that cannot arrive.
+            proc.StandardInput?.Dispose();
             var (result, stdout, stderr) = await proc
                 .WaitForExitWithOutputAsync(cancellationToken)
                 .ConfigureAwait(false);

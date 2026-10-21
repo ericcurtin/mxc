@@ -323,7 +323,7 @@ and `validateProcess` use native dry-run validation and return no execution
 result. There is no `dryRun` execution option or public attached-exec API.
 Captured and streaming execution are asynchronous. Live processes own wait,
 kill, and disposal.
-IsolationSession has stdin; WSLC currently provides stdout/stderr only.
+IsolationSession and WSLC both provide stdin, stdout, and stderr.
 
 ### 6.3 Example
 

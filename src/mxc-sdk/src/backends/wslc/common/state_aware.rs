@@ -13,13 +13,12 @@
 //!
 //! Windows-only: the daemon and its pipe transport are a Windows feature.
 
-use std::io::Write;
+use std::io::{Read, Write};
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(windows)]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::mxc_common::logger::{Logger, Mode};
 use crate::mxc_common::models::{
@@ -180,8 +179,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
     }
 
     /// Runs one command in the warm container. Relayed callers receive live
-    /// output on this process's stdout/stderr; piped callers receive synthesized
-    /// native stdout/stderr pipes fed from the same daemon stream.
+    /// output on this process's stdout/stderr, and the command reads this
+    /// process's stdin unless it is a terminal; piped callers receive
+    /// synthesized native stdin/stdout/stderr pipes bridged to the same daemon
+    /// streams.
     fn exec(
         &mut self,
         sandbox_id: &str,
@@ -300,8 +301,31 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
     }
 }
 
-fn exec_relayed(client: DaemonClient, config: ExecConfig) -> Result<ExecHandle, MxcError> {
+fn exec_relayed(client: DaemonClient, mut config: ExecConfig) -> Result<ExecHandle, MxcError> {
+    use std::io::IsTerminal;
+
     let timeout_ms = config.timeout_ms;
+    let exec_id = config.exec_id.clone();
+    let run_token = config.run_token.clone();
+    config.stdin = !std::io::stdin().is_terminal();
+    let forward_stdin = config.stdin;
+    if !forward_stdin {
+        eprintln!(
+            "WARNING: stdin is a terminal, but the state-aware WSLc exec path does not forward \
+             interactive input. The command sees end-of-file on stdin. Redirect stdin from a file \
+             or a pipe to send it input."
+        );
+    }
+
+    let exec = client.admit_exec(config).map_err(map_daemon_error)?;
+
+    // A pump blocked on a host stdin that never closes does not hold up this
+    // exec: the executor process exits once the run is over, ending the pump.
+    let stdin_failure = if forward_stdin {
+        start_stdin_pump(&client, exec_id, run_token, std::io::stdin())
+    } else {
+        StdinFailure::default()
+    };
 
     // Relay each chunk to our own stdio as it arrives. Hold the stdout/stderr
     // locks for the whole relay so we don't reacquire the handle per chunk,
@@ -316,7 +340,7 @@ fn exec_relayed(client: DaemonClient, config: ExecConfig) -> Result<ExecHandle, 
     let completion = {
         let mut out = stdout.lock();
         let mut err = stderr.lock();
-        let result = client.exec_streaming(config, |stream, bytes| match stream {
+        let result = exec.read_to_completion(|stream, bytes| match stream {
             OutStream::Stdout => {
                 let _ = out.write_all(bytes);
                 if bytes.last() != Some(&b'\n') {
@@ -350,16 +374,21 @@ fn exec_relayed(client: DaemonClient, config: ExecConfig) -> Result<ExecHandle, 
             )))
         }
         DaemonExecOutcome::Cancelled => {
+            if let Some(reason) = stdin_failure.take() {
+                return Err(stdin_forwarding_error(&reason));
+            }
             return Err(MxcError::backend_error(format!(
                 "WSLc relayed exec was cancelled unexpectedly{}",
                 truncation_suffix(completion.truncated)
-            )))
+            )));
         }
     };
 
     Ok(ExecHandle {
         stdout: null_pipe_handle(),
         stderr: null_pipe_handle(),
+
+        // This path feeds the process from host stdin itself.
         stdin: null_pipe_handle(),
         stdin_closer: None,
         // Relayed execution has already completed before this handle is
@@ -375,14 +404,23 @@ fn exec_relayed(client: DaemonClient, config: ExecConfig) -> Result<ExecHandle, 
 #[cfg(windows)]
 fn exec_piped(
     client: DaemonClient,
-    config: ExecConfig,
+    mut config: ExecConfig,
     exec_id: String,
     run_token: String,
 ) -> Result<ExecHandle, MxcError> {
+    use crate::mxc_common::process_util::{create_local_pipe, InterruptiblePipeReader};
+    use crate::mxc_common::sandbox_process::StreamCloser;
+
     let stdout_pipe = prepare_native_output()
         .map_err(|error| MxcError::backend_error(format!("create WSLC stdout pipe: {error}")))?;
     let stderr_pipe = prepare_native_output()
         .map_err(|error| MxcError::backend_error(format!("create WSLC stderr pipe: {error}")))?;
+    let (stdin_read, stdin_write) = create_local_pipe()
+        .map_err(|error| MxcError::backend_error(format!("create WSLC stdin pipe: {error}")))?;
+    let stdin_read = InterruptiblePipeReader::new(stdin_read);
+    let stdin_write = stdin_write
+        .try_into_std_owned_handle()
+        .map_err(|error| MxcError::backend_error(format!("create WSLC stdin pipe: {error}")))?;
     let (stdout_writer, stdout_source, stdout_overflow) =
         bounded_stream_pair(PIPE_BRIDGE_MAX_BUFFERED_BYTES);
     let (stderr_writer, stderr_source, stderr_overflow) =
@@ -395,19 +433,31 @@ fn exec_piped(
         .map_err(|error| MxcError::backend_error(format!("start WSLC stderr pump: {error}")))?;
     let stdout = windows::Win32::Foundation::HANDLE(stdout_reader.as_raw_handle());
     let stderr = windows::Win32::Foundation::HANDLE(stderr_reader.as_raw_handle());
+    let stdin = windows::Win32::Foundation::HANDLE(stdin_write.as_raw_handle());
+    let stdin_canceller = stdin_read.canceller();
+    let stdin_write = Arc::new(Mutex::new(Some(stdin_write)));
+    let closer_stdin_write = Arc::clone(&stdin_write);
     let terminator_client = client.clone();
     let relay_exec_id = exec_id.clone();
     let relay_run_token = run_token.clone();
     let cancellation = Arc::new(AtomicBool::new(false));
     let relay_cancellation = Arc::clone(&cancellation);
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+    config.stdin = true;
 
     std::thread::Builder::new()
         .name("wslc-state-aware-exec".to_string())
         .spawn(move || {
+            let mut stdin_failure = StdinFailure::default();
             let result = client
                 .admit_exec(config)
                 .and_then(|exec| {
+                    stdin_failure = start_stdin_pump(
+                        &client,
+                        relay_exec_id.clone(),
+                        relay_run_token.clone(),
+                        stdin_read,
+                    );
                     if relay_cancellation.load(Ordering::Acquire) {
                         client.cancel_exec(relay_exec_id, relay_run_token)?;
                     }
@@ -429,11 +479,20 @@ fn exec_piped(
                         }
                         DaemonExecOutcome::Exited(code) => Ok(ExecOutcome::Exited(code)),
                         DaemonExecOutcome::TimedOut => Ok(ExecOutcome::TimedOut),
-                        // `SandboxProcess::kill` is a request followed by reaping;
-                        // there is no distinct cancelled variant in `ExecOutcome`.
-                        DaemonExecOutcome::Cancelled => Ok(ExecOutcome::Exited(-1)),
+                        DaemonExecOutcome::Cancelled => match stdin_failure.take() {
+                            Some(reason) => Err(stdin_forwarding_error(&reason)),
+
+                            // `SandboxProcess::kill` is a request followed by
+                            // reaping; there is no distinct cancelled variant in
+                            // `ExecOutcome`.
+                            None => Ok(ExecOutcome::Exited(-1)),
+                        },
                     }
                 });
+
+            // The caller may never close its stdin, so the pump's read is
+            // ended here rather than left waiting on a run that is over.
+            stdin_canceller.close();
             stdout_writer.close();
             stderr_writer.close();
             let _ = done_tx.send(result);
@@ -452,11 +511,23 @@ fn exec_piped(
     Ok(ExecHandle {
         stdout,
         stderr,
-        stdin: null_pipe_handle(),
-        stdin_closer: None,
+        stdin,
+        stdin_closer: Some(Box::new(move || {
+            closer_stdin_write
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+        })),
         waiter: Box::new(move || {
-            // Keep the original read handles alive until the generic adapter has
-            // duplicated them and the daemon stream reaches a terminal frame.
+            // A native handle transfer never calls `stdin_closer`, so this is
+            // what leaves the caller's copy as the only stdin write end.
+            stdin_write
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+
+            // Keep the original read handles alive until the daemon stream
+            // reaches a terminal frame.
             let _readers = (stdout_reader, stderr_reader);
             done_rx.recv().map_err(|_| {
                 MxcError::backend_error(
@@ -513,7 +584,64 @@ fn exec_config(
         env,
         env_scope: EnvScope::of(request),
         timeout_ms: request.script_timeout,
+        stdin: false,
     }
+}
+
+/// Why forwarding an exec's stdin failed, recorded by its pump so a
+/// cancellation nobody asked for can be explained.
+#[derive(Clone, Default)]
+struct StdinFailure(Arc<Mutex<Option<String>>>);
+
+impl StdinFailure {
+    fn record(&self, reason: String) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason);
+    }
+
+    fn take(&self) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+}
+
+/// Copy `input` into an admitted exec's stdin on a thread of its own, cancelling
+/// the exec if that fails so its process does not wait for input forever.
+fn start_stdin_pump(
+    client: &DaemonClient,
+    exec_id: String,
+    run_token: String,
+    input: impl Read + Send + 'static,
+) -> StdinFailure {
+    let failure = StdinFailure::default();
+    let pump_failure = failure.clone();
+    let pump_client = client.clone();
+    let (pump_exec_id, pump_run_token) = (exec_id.clone(), run_token.clone());
+    let spawned = std::thread::Builder::new()
+        .name("wslc-exec-stdin".to_string())
+        .spawn(move || {
+            if let Err(error) =
+                pump_client.forward_stdin(pump_exec_id.clone(), pump_run_token.clone(), input)
+            {
+                pump_failure.record(error.to_string());
+                let _ = pump_client.cancel_exec(pump_exec_id, pump_run_token);
+            }
+        });
+    if let Err(error) = spawned {
+        failure.record(format!("could not start a thread to forward it: {error}"));
+        let _ = client.cancel_exec(exec_id, run_token);
+    }
+    failure
+}
+
+fn stdin_forwarding_error(reason: &str) -> MxcError {
+    MxcError::backend_error(format!(
+        "WSLc exec was cancelled because its stdin could not be forwarded: {reason}"
+    ))
 }
 
 /// Discover (or spawn) the daemon. A discovery/spawn failure is a
