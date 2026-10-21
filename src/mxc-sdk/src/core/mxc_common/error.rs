@@ -10,6 +10,9 @@ pub enum WxcError {
     #[error("Configuration parse error: {0}")]
     ConfigParse(String),
 
+    #[error(transparent)]
+    StateAware(Box<MxcError>),
+
     #[error("Validation error: {0}")]
     Validation(String),
 
@@ -38,6 +41,21 @@ pub enum WxcError {
     StringConversion(String),
 }
 
+impl WxcError {
+    pub(crate) fn into_state_aware(self) -> MxcError {
+        match self {
+            Self::StateAware(error) => *error,
+            error => MxcError::malformed_request(error.to_string()),
+        }
+    }
+}
+
+impl From<MxcError> for WxcError {
+    fn from(error: MxcError) -> Self {
+        Self::StateAware(Box::new(error))
+    }
+}
+
 impl From<serde_json::Error> for WxcError {
     fn from(err: serde_json::Error) -> Self {
         WxcError::ConfigParse(err.to_string())
@@ -54,6 +72,7 @@ impl WxcError {
     /// host rather than a judgement of the policy.
     pub fn error_code(&self) -> MxcErrorCode {
         match self {
+            WxcError::StateAware(error) => error.code,
             WxcError::ConfigParse(_) | WxcError::StringConversion(_) => {
                 MxcErrorCode::MalformedRequest
             }
@@ -69,9 +88,13 @@ impl WxcError {
     }
 
     /// Convert to the typed error carried on the wire, keeping the `Display`
-    /// text as the message so the variant's prefix survives.
+    /// text as the message so the variant's prefix survives. A wrapped
+    /// [`MxcError`] is returned unchanged.
     pub fn to_mxc_error(&self) -> MxcError {
-        MxcError::new(self.error_code(), self.to_string())
+        match self {
+            WxcError::StateAware(error) => (**error).clone(),
+            error => MxcError::new(error.error_code(), error.to_string()),
+        }
     }
 }
 
