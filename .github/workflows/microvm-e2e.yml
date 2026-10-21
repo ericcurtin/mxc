@@ -6,7 +6,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, 'feature/*', 'user/*']
   workflow_dispatch:
 
 permissions:
@@ -61,6 +61,17 @@ jobs:
             exit 1
           }
           Get-Item $required | Format-Table FullName, Length
+
+      - name: Run MicroVM bundle integrity and host-only tests
+        shell: pwsh
+        working-directory: src
+        run: |
+          cargo test -p mxc-sdk --features microvm --test nvx_bundle_integrity --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p mxc-sdk --features microvm --test nvx_e2e --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p mxc-sdk --features microvm --test nvx_e2e --target x86_64-pc-windows-msvc windows_x64::host_only_executor_request_matrix -- --ignored --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Diagnose hypervisor environment
         shell: pwsh

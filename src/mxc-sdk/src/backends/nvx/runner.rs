@@ -4,15 +4,15 @@
 //! Minimal create-and-run adapter for the signed bundled NVX agent.
 
 use std::io::Write;
-use std::time::Duration;
-
-use aci_edge_sandboxes::{ExecOutcome, ExecRequest, ProvisionRequest};
 
 use crate::mxc_common::audit::{AuditEvent, AuditEventName};
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
 use crate::mxc_common::mxc_error::{MxcError, MxcErrorCode};
 use crate::mxc_common::script_runner::ScriptRunner;
+
+use super::abi::{ExecOutcome, ExecRequest};
+use super::runtime::SandboxClient;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapturedOutcome {
@@ -50,16 +50,8 @@ impl NvxRunner {
                     "cannot create a private NVX state directory: {error}"
                 ))
             })?;
-        let prepared = (|| {
-            let client = super::runtime::create_client(state_root.path())?;
-            client.probe().map_err(super::runtime::map_nvx_error)?;
-            let provisioned = client
-                .provision_with(&ProvisionRequest::new(), &super::runtime::sandbox_spec())
-                .map_err(super::runtime::map_nvx_error)?;
-            Ok((client, provisioned.sandbox_id))
-        })();
-        let (client, sandbox_id) = match prepared {
-            Ok(prepared) => prepared,
+        let mut client = match super::runtime::create_client(state_root.path()) {
+            Ok(client) => client,
             Err(error) => {
                 let cleanup = state_root
                     .close()
@@ -72,76 +64,88 @@ impl NvxRunner {
                 return finish_run(Err(error), cleanup, logger);
             }
         };
-        let identity = sandbox_id.to_string();
-        logger.log_audit_event(
-            &AuditEvent::new(AuditEventName::SandboxIdentity)
-                .str("identity", &identity)
-                .str("backend", "microvm")
-                .str("runtime", "signed-bundled-agent"),
-        );
-        let primary = (|| {
-            client
-                .start(&sandbox_id)
-                .map_err(super::runtime::map_nvx_error)?;
-            client
-                .exec(&sandbox_id, &exec_request(request))
-                .map_err(super::runtime::map_nvx_error)?
-                .wait_with_output()
-                .map_err(super::runtime::map_nvx_error)
-        })();
-
-        let stop_error = client
-            .stop(&sandbox_id)
-            .err()
-            .map(super::runtime::map_nvx_error);
-        let stop_error = match stop_error {
-            Some(error) if primary.is_err() && error.code == MxcErrorCode::AlreadyStopped => None,
-            other => other,
-        };
-        let deprovision_error = client
-            .deprovision(&sandbox_id)
-            .err()
-            .map(super::runtime::map_nvx_error);
-        let retain_state = deprovision_error.is_some();
-        let mut cleanup_errors: Vec<MxcError> = [stop_error, deprovision_error]
-            .into_iter()
-            .flatten()
-            .collect();
-        drop(client);
-        if retain_state {
-            let retained = state_root.keep();
-            cleanup_errors.push(MxcError::backend_error(format!(
-                "NVX state retained for recovery after deprovision failure: {}",
-                retained.display()
-            )));
-        } else if let Err(error) = state_root.close() {
-            cleanup_errors.push(MxcError::backend_error(format!(
-                "cannot remove NVX state directory: {error}"
-            )));
-        }
-        logger.log_audit_event(
-            &AuditEvent::new(AuditEventName::SandboxTornDown)
-                .str("identity", &identity)
-                .str("backend", "microvm")
-                .str(
-                    "status",
-                    if cleanup_errors.is_empty() {
-                        "ok"
-                    } else {
-                        "failed"
-                    },
-                )
-                .bool("state_retained", retain_state),
-        );
-        let output = finish_run(primary, cleanup_errors, logger)?;
-
-        Ok(CapturedRun {
-            outcome: map_outcome(output.outcome)?,
-            warnings: Vec::new(),
-            stdout: output.stdout,
-            stderr: output.stderr,
-        })
+        run_with_client(&mut client, state_root, request, logger)
     }
+}
+
+fn run_with_client(
+    client: &mut impl SandboxClient,
+    state_root: tempfile::TempDir,
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+) -> Result<CapturedRun, MxcError> {
+    let sandbox_id = match client.probe().and_then(|()| client.provision()) {
+        Ok(sandbox_id) => sandbox_id,
+        Err(error) => {
+            let mut cleanup = Vec::new();
+            if let Err(close_error) = client.close() {
+                cleanup.push(close_error);
+            }
+            if let Err(remove_error) = state_root.close() {
+                cleanup.push(MxcError::backend_error(format!(
+                    "cannot remove NVX state: {remove_error}"
+                )));
+            }
+            return finish_run(Err(error), cleanup, logger);
+        }
+    };
+
+    let identity = sandbox_id.to_string();
+    logger.log_audit_event(
+        &AuditEvent::new(AuditEventName::SandboxIdentity)
+            .str("identity", &identity)
+            .str("backend", "microvm")
+            .str("runtime", "signed-bundled-agent"),
+    );
+    let primary = (|| {
+        client.start(&sandbox_id)?;
+        client.exec_and_wait(&sandbox_id, &exec_request(request))
+    })();
+
+    let stop_error = match client.stop(&sandbox_id).err() {
+        Some(error) if primary.is_err() && error.code == MxcErrorCode::AlreadyStopped => None,
+        other => other,
+    };
+    let deprovision_error = client.deprovision(&sandbox_id).err();
+    let retain_state = deprovision_error.is_some();
+    let close_error = client.close().err();
+    let mut cleanup_errors: Vec<MxcError> = [stop_error, deprovision_error, close_error]
+        .into_iter()
+        .flatten()
+        .collect();
+    if retain_state {
+        let retained = state_root.keep();
+        cleanup_errors.push(MxcError::backend_error(format!(
+            "NVX state retained for recovery after deprovision failure: {}",
+            retained.display()
+        )));
+    } else if let Err(error) = state_root.close() {
+        cleanup_errors.push(MxcError::backend_error(format!(
+            "cannot remove NVX state directory: {error}"
+        )));
+    }
+    logger.log_audit_event(
+        &AuditEvent::new(AuditEventName::SandboxTornDown)
+            .str("identity", &identity)
+            .str("backend", "microvm")
+            .str(
+                "status",
+                if cleanup_errors.is_empty() {
+                    "ok"
+                } else {
+                    "failed"
+                },
+            )
+            .bool("state_retained", retain_state),
+    );
+    let output = finish_run(primary, cleanup_errors, logger)?;
+
+    Ok(CapturedRun {
+        outcome: map_outcome(output.outcome)?,
+        warnings: Vec::new(),
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
 }
 
 fn finish_run<T>(
@@ -246,7 +250,7 @@ fn captured_to_script_response(
 fn exec_request(request: &ExecutionRequest) -> ExecRequest {
     let mut exec = ExecRequest::command_line(request.script_code.clone());
     if request.script_timeout != 0 {
-        exec = exec.with_timeout(Duration::from_millis(u64::from(request.script_timeout)));
+        exec = exec.with_timeout_ms(u64::from(request.script_timeout));
     }
     if !request.working_directory.is_empty() {
         exec = exec.with_cwd(request.working_directory.clone());
@@ -259,6 +263,7 @@ fn exec_request(request: &ExecutionRequest) -> ExecRequest {
 
 #[cfg(test)]
 mod tests {
+    use super::super::runtime::{ExecOutput, SandboxId};
     use super::*;
 
     #[test]
@@ -412,11 +417,8 @@ mod tests {
             ..Default::default()
         };
         let mapped = exec_request(&request);
-        assert_eq!(
-            mapped.process.command,
-            aci_edge_sandboxes::Command::CommandLine(request.script_code)
-        );
-        assert_eq!(mapped.process.timeout, Some(Duration::from_millis(250)));
+        assert_eq!(mapped.process.command_line, request.script_code);
+        assert_eq!(mapped.process.timeout, Some(250));
         assert_eq!(mapped.process.cwd.as_deref(), Some("/tmp"));
         assert_eq!(mapped.process.env, Some(Vec::new()));
         assert_eq!(mapped.process.inherit_default_env, Some(true));
@@ -425,5 +427,131 @@ mod tests {
         assert_eq!(defaults.process.env, None);
         assert_eq!(defaults.process.timeout, None);
         assert_eq!(defaults.process.cwd, None);
+    }
+
+    struct MockClient {
+        calls: Vec<&'static str>,
+        probe_res: Result<(), MxcError>,
+        provision_res: Result<SandboxId, MxcError>,
+        start_res: Result<(), MxcError>,
+        exec_res: Result<ExecOutput, MxcError>,
+        stop_res: Result<(), MxcError>,
+        deprovision_res: Result<(), MxcError>,
+        close_res: Result<(), MxcError>,
+    }
+
+    impl MockClient {
+        fn ok() -> Self {
+            Self {
+                calls: Vec::new(),
+                probe_res: Ok(()),
+                provision_res: SandboxId::from_token("0123456789abcdef0123456789abcdef"),
+                start_res: Ok(()),
+                exec_res: Ok(ExecOutput {
+                    outcome: ExecOutcome::Exited(0),
+                    stdout: b"ok".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                stop_res: Ok(()),
+                deprovision_res: Ok(()),
+                close_res: Ok(()),
+            }
+        }
+    }
+
+    impl SandboxClient for MockClient {
+        fn probe(&self) -> Result<(), MxcError> {
+            self.probe_res.clone()
+        }
+
+        fn provision(&self) -> Result<SandboxId, MxcError> {
+            self.provision_res.clone()
+        }
+
+        fn start(&self, _sandbox_id: &SandboxId) -> Result<(), MxcError> {
+            self.start_res.clone()
+        }
+
+        fn exec_and_wait(
+            &self,
+            _sandbox_id: &SandboxId,
+            _request: &ExecRequest,
+        ) -> Result<ExecOutput, MxcError> {
+            self.exec_res.clone()
+        }
+
+        fn stop(&self, _sandbox_id: &SandboxId) -> Result<(), MxcError> {
+            self.stop_res.clone()
+        }
+
+        fn deprovision(&self, _sandbox_id: &SandboxId) -> Result<(), MxcError> {
+            self.deprovision_res.clone()
+        }
+
+        fn close(&mut self) -> Result<(), MxcError> {
+            self.calls.push("close");
+            self.close_res.clone()
+        }
+    }
+
+    #[test]
+    fn lifecycle_cleanup_surfaces_host_close_and_retains_state_on_deprovision_failure() {
+        let mut logger = Logger::new(crate::mxc_common::logger::Mode::Buffer);
+        let request = ExecutionRequest {
+            script_code: "echo ok".to_owned(),
+            ..Default::default()
+        };
+
+        // 1. Probe failure still closes host and surfaces close failure.
+        let state_root = tempfile::tempdir().unwrap();
+        let state_path = state_root.path().to_path_buf();
+        let mut client = MockClient::ok();
+        client.probe_res = Err(MxcError::backend_unavailable("probe failed"));
+        client.close_res = Err(MxcError::backend_error("host_close failed"));
+        let err = run_with_client(&mut client, state_root, &request, &mut logger).unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::BackendUnavailable);
+        assert!(err.message.contains("probe failed"));
+        assert!(err.message.contains("host_close failed"));
+        assert_eq!(client.calls, ["close"]);
+        assert!(!state_path.exists());
+
+        // 2. Start failure suppresses AlreadyStopped on stop, deprovisions, closes host, removes state.
+        let state_root = tempfile::tempdir().unwrap();
+        let state_path = state_root.path().to_path_buf();
+        let mut client = MockClient::ok();
+        client.start_res = Err(MxcError::backend_error("start failed"));
+        client.stop_res = Err(MxcError::new(
+            MxcErrorCode::AlreadyStopped,
+            "already stopped",
+        ));
+        let err = run_with_client(&mut client, state_root, &request, &mut logger).unwrap_err();
+        assert_eq!(err.message, "start failed");
+        assert_eq!(client.calls, ["close"]);
+        assert!(!state_path.exists());
+
+        // 3. Host close failure after workload success fails the run.
+        let state_root = tempfile::tempdir().unwrap();
+        let state_path = state_root.path().to_path_buf();
+        let mut client = MockClient::ok();
+        client.close_res = Err(MxcError::backend_error("host_close failed"));
+        let err = run_with_client(&mut client, state_root, &request, &mut logger).unwrap_err();
+        assert!(err
+            .message
+            .contains("NVX cleanup failed after workload completion"));
+        assert!(err.message.contains("host_close failed"));
+        assert!(!state_path.exists());
+
+        // 4. Deprovision failure retains state directory and fails the run.
+        let state_root = tempfile::tempdir().unwrap();
+        let state_path = state_root.path().to_path_buf();
+        let mut client = MockClient::ok();
+        client.deprovision_res = Err(MxcError::backend_error("deprovision failed"));
+        let err = run_with_client(&mut client, state_root, &request, &mut logger).unwrap_err();
+        assert!(err.message.contains("deprovision failed"));
+        assert!(err
+            .message
+            .contains("NVX state retained for recovery after deprovision failure"));
+        assert!(state_path.exists());
+        std::fs::remove_dir_all(&state_path).unwrap();
     }
 }

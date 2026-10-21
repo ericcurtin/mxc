@@ -180,10 +180,11 @@ temporary storage without creating directories.
 ### Experimental NVX create-and-run
 
 The `microvm` feature enables only Windows x64 and requires runtime experimental
-authorization. P1 uses the official signed `aci_edge_sandboxes` bundled agent at
-immutable Git revision `0430ce79d125203c20f0aa69243480513a774296`; it does not
-enable the standalone OpenVMM feature. This development crate has
-`publish = false`.
+authorization. P1 stages the official signed `aci-edge-sandboxes.zip` release
+bundle (`v0.1.0-dev.0430ce79d125` from NVX revision
+`0430ce79d125203c20f0aa69243480513a774296`) during the crate build and loads the
+verified `bin/aci_edge_agent.dll` C ABI v1 in-process without unpublished Rust
+dependencies; it does not enable standalone OpenVMM execution.
 
 The existing hidden JSON facade `mxc_sdk::__ffi::run_json(json, true)` supports
 the development `1.1.0-alpha` MicroVM create-and-run request with captured
