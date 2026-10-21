@@ -1,313 +1,225 @@
-# Process Container Networking Configuration, GA
+# ProcessContainer networking
 
 > **Audience:** MXC consumers and developers
 
-Supported contracts from `0.9.0-alpha` use the shared `network.egress`
-and `network.ingress` policy plus `runtimeConfig.networkProxy` and
-`processContainer.network.allowedProxyPeer` configuration.
+This guide covers network access for the Windows ProcessContainer backend.
+Examples use the [Node SDK V1](../../api-reference/node/v1/README.md).
+Pass each `network` value as `ContainerRequest.network` and select
+`containment: { type: 'processcontainer' }`. Supply the workload's command and
+filesystem permissions as shown in the [SDK quickstart](../../../sdk/node/README.md#run-to-completion).
 
-For the shared policy shape and defaults, see
-[directional networking](../../schema.md#directional-networking-supported-contracts).
-This guide covers how the Windows ProcessContainer backend enforces them.
+## Choose the connection you need
 
-ProcessContainer is available on Windows 11 24H2 and later. The initial
-24H2 and 25H2 releases (builds 26100.9278 and 26200.9278, respectively) support
-connections to medium-integrity host listeners. Builds 26100.9550 and
-26200.9550 add support for hosting loopback servers inside the container and
-connecting to low-integrity listeners. See
-[Windows OS-version support](os-version-support.md) for supported releases.
-
-## 1. What this backend targets at GA
-
-On ProcessContainer paths with OS-scoped enforcement, each container gets two enforcement primitives scoped to its
-container SID and applied with no UAC prompt per launch. The AppContainer compatibility behavior is documented in
-section 2 and is not equivalent to these guarantees.
-
-- **WFP egress filters:** block outbound traffic by default, then allow or block specific public or private
-  destinations by IP address or range, protocol, and port for both IPv4 and IPv6. An explicit block always wins over
-  an allow. The rules apply only to this container.
-- **Per-container WinHTTP HTTP/S proxy:** points WinHTTP-stack clients (e.g., the WinHTTP/Chromium stack) at a
-  caller-provided loopback proxy container. MXC also sets `HTTP_PROXY`, `HTTPS_PROXY`, and their lowercase variants to
-  the loopback endpoint for runtimes that use proxy environment variables rather than WinHTTP. `NO_PROXY` is a bypass
-  list and does not carry the proxy endpoint. The containment boundary is the absence of direct internet capability.
-  Private-network traffic remains available in both directions when `ingress.default` is `"allow"`.
-
-The examples below use the supported directional network shape.
-
-Windows exposes `privateNetworkClientServer` as one bidirectional AppContainer capability. ProcessContainer therefore
-requires `ingress.default: "allow"` before the container can communicate with private-network addresses. Enabling it
-also permits private-network server traffic. `ingress.default` gates whether the capability exists; `egress` then
-narrows the outbound public and private destinations reachable through the granted capabilities.
-`ingress.hostLoopback` remains the separate host-loopback control.
-
-| Egress default | Ingress default | AppContainer capabilities | Result |
-|---|---|---|---|
-| `deny` | `deny` | None | Internet and private-network traffic are denied. |
-| `allow` | `deny` | `internetClient` | Internet outbound is allowed; private-network traffic is denied. |
-| `deny` | `allow` | `privateNetworkClientServer` | PSEC blocks outbound with WFP and permits private-network inbound. The AppContainer fallback rejects this combination because the capability is bidirectional. |
-| `allow` | `allow` | Both capabilities | Internet outbound and bidirectional private-network traffic are allowed. |
-
-This matrix covers the direction defaults without explicit internet egress rules or proxy mode.
-It describes the ordinary non-capture capability posture. Native PSEC
-`captureDenials` temporarily adds `internetClient` only when the option-aware
-trace collects network decisions and the caller explicitly supplies a direct
-`network.egress` section, allowing Tessera's WFP policy to observe and record
-the attempt while the authored egress table continues to enforce it. Legacy
-access-only capture, absent or ingress-only network policy, non-capture
-runs, and proxy mode retain the matrix posture.
-
-### Model 1: direct egress, WFP-filtered (least restrictive)
-
-- **Capabilities:** `internetClient`, plus `privateNetworkClientServer` only when `ingress.default` is `"allow"`.
-- **Enforcement:** WFP allow/block rules; no proxy.
-
-```jsonc
-{
-  "network": {
-    "egress": {
-      "default": "deny",
-      "allow": [
-        { "to": [ { "cidr": "140.82.112.0/20" } ],
-          "ports": [ { "protocol": "tcp", "port": 443 } ] }
-      ]
-    },
-    "ingress": {
-      "default": "deny",
-      "hostLoopback": "deny"
-    }
-  }
-}
-```
-
-### Model 2: proxy-only egress (recommended)
-
-| Item | Requirement |
+| Workload needs | Use |
 |---|---|
-| Client capability | `privateNetworkClientServer`, enabled by `ingress.default: "allow"` |
-| Proxy capabilities | `privateNetworkClientServer`; also `internetClient` for external destinations |
-| Network policy | `egress.default: "deny"` and `ingress.default: "allow"` |
-| Enforcement | Capability is bidirectional; WFP permits client egress only to the configured proxy endpoint |
+| Internet access to selected destinations | [Direct egress](#direct-egress) with IP/CIDR and port rules |
+| A service on the same host, or another BaseContainer | [Host loopback](#host-loopback) |
+| One HTTP/S proxy | [Proxy-only egress](#proxy-only-egress) |
+| Internal services or a browser's debugging port | [Known issue: intra-container loopback](#known-issue-intra-container-loopback) |
+| No external network access | Leave the proxy and peer unset; omit network policy or set egress, ingress, and host loopback to `deny`. |
 
-This is a ProcessContainer-specific mapping. Callers that need a private-network proxy or any other private-network
-communication must set `ingress.default` to `"allow"` and accept that Windows enables both private-network client and
-server behavior. On an enforcing BaseContainer path, per-container WFP permits the MXC client container to connect only
-to the configured loopback address and port and blocks direct public and private destinations.
+## Check the target host
 
-#### Proxy deployment choices
+Install the applicable Windows updates; see
+[Windows OS-version support](os-version-support.md).
+Use the public SDK's request-aware probe on the machine that will run the workload.
 
-Model 2 involves two separate processes:
+| Windows probe result | Meaning |
+|---|---|
+| `tier: "base-container"` | BaseContainer is selected; individual network features still need host support. |
+| `probes.baseContainerSupportsIngressHostLoopbackAllow` | Bidirectional host loopback, including container listeners and connections between BaseContainers |
+| `probes.baseContainerSupportsIdentitylessLoopbackProxy` | An unpackaged, non-AppContainer loopback proxy can be used without a peer identity. This does not establish general bidirectional loopback support. |
 
-- **MXC client container:** the BaseContainer created by MXC, which runs the caller's workload and initiates HTTP/S
-  connections to the proxy.
-- **Proxy process:** a caller-created process that is already running outside the MXC client container. It may be
-  packaged or unpackaged, with or without AppContainer isolation.
+When the bidirectional-loopback fact is `false`, a BaseContainer can still
+connect to supported loopback listeners outside BaseContainers, but not to
+listeners inside another BaseContainer. When it is `true`, containers can also
+host loopback servers reachable from the host or other BaseContainers.
+The connection must still satisfy network policy and firewall rules.
 
-MXC must reject a `runtimeConfig.networkProxy` endpoint that is not loopback. The caller must configure the proxy to
-bind only the exact loopback address and port supplied to MXC.
+A successful probe checks request support, not listener readiness, proxy
+identity, firewall authorization, or application connectivity.
+MXC rejects policy it cannot enforce before launching the workload.
 
-| External proxy | `allowedProxyPeer` | MXC client policy | Additional proxy identity |
-|---|---|---|---|
-| Packaged proxy | Package Family Name | `default: "allow"`; `hostLoopback: "deny"` | Package identity |
-| Unpackaged AppContainer | Profile | `default: "allow"`; `hostLoopback: "deny"` | AppContainer profile |
-| Unpackaged non-AppContainer (development/testing compatibility) | Omit | `default: "allow"`; `hostLoopback: "allow"` | None |
+## Direct egress
 
-All deployments retain the base Model 2 client policy. `allowedProxyPeer` adds proxy identity binding on top of the
-common WFP endpoint enforcement. The proxy endpoint is the loopback address and port in
-`runtimeConfig.networkProxy`. The packaged row covers both AppContainer and non-AppContainer proxies because their
-client policy and package identity are the same; the enforcement table below separates their additional protections.
+Use deny-default egress with explicit destinations. For example, allow HTTPS
+to one public IP range:
 
-`ingress.hostLoopback` requests access in both directions; the supported directions depend on the Windows build.
-`allowedProxyPeer` authorizes a package family or AppContainer profile without
-opening general host-loopback access, so identity-scoped paths keep `hostLoopback: "deny"`. Only an unpackaged
-non-AppContainer proxy lacks an accepted peer identity and requires `hostLoopback: "allow"`. This is a weaker
-development/testing compatibility deployment, not the shared policy's strict host-loopback-closure guarantee.
-The shared setting requests both host-loopback directions, while WFP restricts client-container egress to the
-configured proxy endpoint.
-Requests the PSEC contract cannot preserve continue to an AppContainer tier.
+```typescript
+import type { NetworkPolicy } from '@microsoft/mxc-sdk/v1';
 
-#### Discovering identity-less loopback proxy support
-
-Backend discovery reports `identitylessLoopbackProxy` on the ProcessContainer
-`base-container` tier when the host supports an identity-less proxy on loopback.
-The Windows request probe also reports
-`probes.baseContainerSupportsIdentitylessLoopbackProxy`, including when called
-without a request.
-
-This does not grant general `ingressHostLoopbackAllow` support or report that the
-current request uses an identity-less proxy. The request must set
-`runtimeConfig.networkProxy`, omit `processContainer.network.allowedProxyPeer`,
-and explicitly allow host loopback, while retaining the Model 2 network policy.
-Other requested features still require their own host support.
-Use the request-aware probe for the complete policy. Neither probe launches the
-workload or checks proxy reachability.
-
-**Unresolved ingress limitation:** on Windows build 26691.1002, this proxy mapping permits unprivileged connections
-to the configured proxy and blocks direct loopback bypasses, but host-to-container listener connections still time
-out. The same listener succeeds under a non-proxy PSEC ingress policy. The proxy mapping is therefore not yet a
-complete implementation of the shared bidirectional `hostLoopback: "allow"` contract.
-
-#### Identity-scoped proxy
-
-Use the [supported proxy-policy example](../../schema.md#directional-networking-supported-contracts),
-which shows `runtimeConfig.networkProxy`,
-`processContainer.network.allowedProxyPeer`, and their relationship in one place.
-Use the installed Package Family Name for a packaged proxy, regardless of whether it has AppContainer isolation. Use
-the AppContainer profile name for an unpackaged AppContainer proxy.
-
-#### Unpackaged non-AppContainer proxy (development/testing compatibility)
-
-An unpackaged non-AppContainer proxy has no package family or AppContainer profile identity:
-
-```jsonc
-{
-  "network": {
-    "egress": { "default": "deny" },
-    "ingress": {
-      "default": "allow",
-      "hostLoopback": "allow"
-    }
+const network: NetworkPolicy = {
+  egress: {
+    default: 'deny',
+    allow: [
+      {
+        to: [{ cidr: '140.82.112.0/20' }],
+        ports: [{ protocol: 'tcp', port: 443 }],
+      },
+    ],
   },
-  "runtimeConfig": {
-    "networkProxy": "http://127.0.0.1:8080"
-  }
-  // No processContainer.network.allowedProxyPeer.
-}
+  ingress: { default: 'deny', hostLoopback: 'deny' },
+};
 ```
 
-MXC grants the client container `privateNetworkClientServer` through `ingress.default: "allow"`, just as it does for an
-identity-scoped proxy. The difference is that MXC identifies this proxy only by the configured endpoint and grants
-the loopback capability; the inbound limitation above still applies. This is the lowest-enforcement deployment option because common WFP endpoint
-scoping remains, but Windows cannot verify which host process owns that endpoint. It is intended primarily for
-development and debugging. PSEC grants `networkLoopback` to authorize the host-loopback connection without MXC
-installing administrator-owned firewall rules. Independently managed host firewall restrictions can still apply.
+- Windows Filtering Platform (WFP) enforces outbound rules per container.
+  An explicit deny takes precedence over an allow.
 
-#### HTTP client guidance
+- Rules select numeric IP addresses or CIDR ranges, protocols, and ports.
+  They do not filter by hostname, URL, or application protocol.
 
-Code inside the ProcessContainer should use WinHTTP or an HTTP library that queries the system for proxy information.
-The OS sets this configuration per BaseContainer, and the WinHTTP stack uses it transparently. The proxy process itself
-does not use the BaseContainer's configuration.
+- Private-network access requires `network.ingress.default: "allow"`.
+  Windows grants private-network client and server access together, so this
+  also permits private-network inbound traffic. Egress rules still restrict
+  outbound destinations.
 
-MXC also sets the standard proxy environment variables for libraries that use cooperative proxying. Direct internet
-traffic that bypasses the proxy is blocked. On an enforcing BaseContainer path, per-container WFP permits egress only to
-the configured loopback proxy address and port and blocks direct public and private destinations.
+- There are no inbound CIDR or port rules. `network.ingress.default` and
+  `network.ingress.hostLoopback` are allow/deny controls.
 
-Model 2 requires `egress.default: "deny"` and `ingress.default: "allow"`. When a non-blank `allowedProxyPeer` names a
-package or AppContainer profile, MXC authorizes only that peer and `ingress.hostLoopback` remains denied. An
-identity-less host proxy omits `allowedProxyPeer` and requires `ingress.hostLoopback: "allow"`. Direct egress allow and
-deny rules do not apply when `runtimeConfig.networkProxy` is present.
+## Host loopback
 
-The proxy endpoint is runtime metadata, not shared network policy. MXC configures the per-container WinHTTP proxy,
-applies WFP endpoint scoping, and grants the private-network capability selected by `ingress.default`.
+To reach a host service directly, allow its loopback IP and port in
+`network.egress.allow` and set `network.ingress.hostLoopback` to `"allow"`.
+An egress rule alone does not authorize crossing the host-loopback boundary.
 
-The identity-scoped and host-loopback paths are mutually exclusive. When `allowedProxyPeer` is present, MXC resolves
-the package family or AppContainer profile and grants the private-network capability selected by `ingress.default`.
-When it is omitted, MXC uses the configured proxy endpoint without peer identity binding and requires bidirectional
-host-loopback access. MXC configures the per-container WinHTTP proxy for either path.
+**Host loopback is bidirectional, not an outbound-only exception.**
+Where supported, it also lets host processes and other BaseContainers connect
+to listeners inside the container. There are no inbound port restrictions.
+The other container's policy and the listener's firewall authorization must
+also permit the connection.
 
-The caller must:
+For one HTTP/S proxy address and port, prefer proxy-only egress instead of
+general host-loopback access.
 
-- create and authorize the proxy;
-- start it before the BaseContainer;
-- keep it alive until the client exits; and
-- leave egress deny-default with no direct allow or deny rules.
+## Proxy-only egress
 
-#### Proxy identity and firewall authorization
+Set `network.runtimeConfig.networkProxy` to the URL where the proxy listens,
+such as `http://127.0.0.1:8080`: address `127.0.0.1`, port `8080`.
+**MXC blocks client-container traffic to every other address and port.**
+This restriction is enforced even if the workload ignores the proxy settings.
+The caller runs the proxy outside the MXC client container.
 
-The WFP loopback-address-and-port restriction described above applies to every row. The table compares the additional
-OS enforcement provided for the external proxy. A packaged AppContainer proxy provides the best enforcement. The two
-middle rows provide different protections and are not ordered relative to each other.
+| Setting | Requirement |
+|---|---|
+| `network.runtimeConfig.networkProxy` | The URL matching the proxy's loopback listening address and port |
+| `network.egress.default` | `deny`, with no direct egress allow or deny rules |
+| `network.ingress.default` | `allow`, required for proxy communication; proxy-only policy restricts outbound connections to the configured proxy address and port |
+| `containment.config.network.allowedProxyPeer` | Package Family Name or AppContainer profile name, when the proxy has one |
+| `network.ingress.hostLoopback` | `deny` with a named peer; `allow` without one |
 
-| Proxy deployment | `allowedProxyPeer` | Additional OS enforcement |
-|---|---|---|
-| Packaged AppContainer | Package family name | **Best:** AppContainer isolation, package identity, package firewall |
-| Unpackaged AppContainer | AppContainer profile name | AppContainer isolation and administrator firewall rule |
-| Packaged non-AppContainer | Package family name | Package identity and package firewall; no AppContainer isolation |
-| Unpackaged non-AppContainer | Omit | **Least:** no proxy identity or isolation; PSEC loopback capability |
+The caller must start the proxy first, wait for its listener, and keep it alive
+until the workload exits. Bind it only to the configured loopback address and port.
+MXC does not create the proxy or control its own outbound access.
 
-For identity-scoped proxies, the scoped peer rule and `privateNetworkClientServer` do not bypass Windows
-Firewall's block-inbound-to-non-allowed-apps policy. A packaged AppContainer proxy uses the package-owned firewall
-declaration shown in the [proxy package manifest example](examples/0.8.0-schema.md); its application entry uses
-`uap10:RuntimeBehavior="packagedClassicApp"` with `uap10:TrustLevel="appContainer"`. An unpackaged AppContainer proxy
-requires its installer or administrator to own an equivalent rule scoped to the AppContainer profile SID, proxy
-executable, and configured port.
-See
-[CreateAppContainerProfile](https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-createappcontainerprofile)
-for unpackaged profile creation.
+### Proxy deployment choices
 
-### Model 3: externally blocked (most restrictive)
+For common setup and step-by-step guides, start with the
+[networking examples](networking-examples/README.md).
+Peer identity, proxy isolation, and firewall authorization are separate protections:
 
-- **Capabilities:** none; no host or peer loopback exemptions.
-- **Enforcement:** no proxy; external outbound and inbound are dropped.
-  Intra-sandbox loopback is not part of the shared external-network policy.
+| Proxy deployment | `allowedProxyPeer` | `hostLoopback` | Proxy protection |
+|---|---|---|---|
+| [Packaged AppContainer](networking-examples/packaged-appcontainer-proxy.md) | Installed Package Family Name | `deny` | AppContainer isolation and package identity |
+| [Unpackaged AppContainer](networking-examples/unpackaged-appcontainer-proxy.md) | AppContainer profile name | `deny` | AppContainer isolation and profile identity |
+| [Packaged non-AppContainer](networking-examples/packaged-non-appcontainer-proxy.md) | Installed Package Family Name | `deny` | Package identity; no AppContainer isolation |
+| [Unpackaged non-AppContainer](networking-examples/unpackaged-non-appcontainer-proxy.md) | Omit | `allow` | No proxy identity binding or AppContainer isolation |
 
-When no runtime proxy or backend proxy peer is configured, deny-all is the default and model 3 is also the result of
-providing no network policy at all: the explicit form, an omitted network block, and an empty `"network": {}` are
-equivalent:
+**Prefer a packaged or AppContainer proxy.** With `allowedProxyPeer`, Windows
+checks that the process receiving the loopback connection belongs to the named
+package or AppContainer profile. An unrelated process at the same address and
+port is not an authorized peer.
 
-```jsonc
-// explicit (canonical blocked: direct egress, default deny, no allow rules)
-{
-  "network": {
-    "egress": { "default": "deny" },   // no allow rules
-    "ingress": {
-      "default": "deny",
-      "hostLoopback": "deny"
-    }
-  }
-}
+AppContainer isolation also restricts the proxy itself; package identity alone
+does not. An identity-less proxy has no peer identity check and is intended for
+development and testing.
 
-// or
-{ /* no "network" key at all */ }
+### Proxy identity and firewall authorization
 
-// or
-{ "network": {} }
+**Identity-scoped proxies:** an additional inbound firewall rule is needed on
+the initial ProcessContainer builds, but not on the
+[fixed Windows builds](networking-examples/README.md#loopback-proxy-firewall-requirements).
+This applies to packaged proxies and unpackaged proxies running in an AppContainer.
+
+**Identity-less proxies:** no additional firewall rule is needed.
+Existing administrator-managed firewall restrictions still apply.
+
+- `allowedProxyPeer` authorizes a package family or AppContainer profile.
+  It does not create the profile, launch the proxy, or install a firewall rule.
+
+- Where a rule is required, a packaged proxy supplies its package-owned inbound
+  firewall declaration. An unpackaged AppContainer needs an installer- or
+  administrator-owned rule scoped to its profile SID, executable, and port.
+
+- AppContainer proxies need `privateNetworkClientServer` to communicate with
+  the client, plus `internetClient` when forwarding to external destinations.
+
+- If the host requires the rule, arrange authorization with the installer or
+  administrator. Do not broaden the client's policy to compensate for a missing rule.
+
+### Identity-less loopback proxy
+
+For an unpackaged proxy without AppContainer isolation, omit `allowedProxyPeer`:
+
+```typescript
+import type { NetworkPolicy } from '@microsoft/mxc-sdk/v1';
+
+const network: NetworkPolicy = {
+  egress: { default: 'deny' },
+  ingress: { default: 'allow', hostLoopback: 'allow' },
+  runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
+};
 ```
 
-### 1.1 Out of GA scope for this backend
+Check `probes.baseContainerSupportsIdentitylessLoopbackProxy` or the
+`identitylessLoopbackProxy` capability in backend discovery. Probe the complete
+request as well; other features may have separate requirements.
+This path does not require an additional firewall rule,
+but independently managed host firewall restrictions still apply.
 
-Do not infer otherwise from the schema:
+**Inbound limitation:** identity-less proxy mode can permit connections to
+the proxy while host-to-container listener connections time out. Do not rely
+on this mode for hosting a loopback server inside the client container.
 
-- Transparent TCP/UDP redirection through the proxy. GA proxying is WinHTTP HTTP/S only.
-- L7 classification (e.g., HTTPS vs SSH on :443).
-- Durable DNS-name rules.
-- Encrypted-payload inspection.
-- Per-source or per-port inbound rules. GA ingress is limited to the
-  `default` and `hostLoopback` allow/deny toggles.
+### HTTP client behavior
 
-The egress schema selects numeric destinations, protocols, and ports, not
-durable DNS names or application payloads. Its ingress schema has only
-`default` and `hostLoopback` toggles; it cannot select inbound peers or ports.
+- **Recommended:** use WinHTTP, or an HTTP/S library that explicitly queries
+  Windows proxy configuration through Windows APIs. MXC configures these
+  settings per container.
 
-## 2. Supported-contract selection and downlevel behavior
+- **Environment-based clients:** MXC also sets `HTTP_PROXY` and `HTTPS_PROXY`
+  for libraries that use proxy environment variables. Confirm that the
+  library honors them.
 
-Both WFP filter writes and per-container WinHTTP proxy configuration require a
-privileged context. For requests using supported contracts, MXC probes the
-host and selects the strongest usable process-creation API.
+- **Network restriction:** the workload can connect only to the configured
+  proxy address and port. Ignoring proxy settings or opening sockets directly
+  does not permit access to other destinations. The proxy must validate all
+  traffic received at its allowed address and port.
 
-**Preferred selection:** Use PSEC (`CreateProcessSecurityEnvironment`) when its complete export set and runtime support
-probe succeed. PSEC is the only ProcessContainer path that receives directional egress filters, proxy peer identity, or
-host-loopback configuration because it owns the corresponding policy lifetime through workload completion. When PSEC
-is unavailable or incompatible, selection continues to AppContainer, where unsupported policy is rejected.
+- **Protocol:** proxy configuration is not transparent TCP/UDP redirection.
+  The client must use the proxy's supported HTTP/S protocol.
 
-**Downlevel behavior:** When PSEC is unavailable, compatible requests use the AppContainer fallback.
-`egress.default: "allow"` grants `internetClient`; `ingress.default: "allow"` grants the bidirectional
-`privateNetworkClientServer` capability. This is the documented ProcessContainer mapping on every tier, not a
-downlevel weakening. Retired `network.proxy` requests fail at exact-version
-dispatch. Supported runtime-proxy requests do not fall back when AppContainer
-cannot preserve their peer or host-loopback requirements.
+For a public proxy, multiple proxy addresses or ports, or another protocol,
+use direct egress rules instead. Add host-loopback access only when needed.
 
-The AppContainer fallback is selected only when its capability mapping preserves the request. Explicit egress rules,
-proxy peer identity, and host-loopback allow fail with a typed unsupported-policy error when PSEC cannot enforce them.
+## Known issue: intra-container loopback
 
-## 3. WFP enforcement
+Connections to a TCP loopback listener inside the same container can fail with
+`EACCES`, even with egress allowed. This is a known Windows issue tracked in
+[#1505](https://github.com/microsoft/mxc/issues/1505).
+A fix is planned for a future Windows release; the target release and build
+are **TBD**.
 
-PSEC applies outbound WFP filters in the OS's elevated context and owns their lifetime. AppContainer fallback does not
-install directional WFP filters. It uses capabilities for supported direction
-defaults and keeps the external runtime proxy setup. Its network audit records retain the firewall fields with
-`firewall_rules_created` and `firewall_rules_removed` at `0`, `firewall_applied` at `false`, and
-`firewall_removal_ok` at `true`.
+Allowing `127.0.0.1/32` is not a reliable workaround. Do not enable general host
+loopback just to make internal sockets work.
 
-WFP implements `egress` rules for public and private destinations. `internetClient` enables public-network access.
-`privateNetworkClientServer`, selected through `ingress.default`, is the prerequisite for private-network access and
-also enables private-network inbound traffic. ProcessContainer therefore cannot allow private-network outbound while
-denying private-network inbound.
+## Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| The request is rejected before launch | Probe the complete request on the target host. Check proxy/peer settings, required ingress values, and whether direct rules were combined with proxy mode. |
+| Probe succeeds, but the proxy times out | Listener readiness, exact address and port, running package/profile identity, and inbound firewall authorization |
+| Public connections work, private destinations do not | `ingress.default` must be `allow` for private-network access; check egress rules too. |
+| A host service is unreachable despite a loopback egress rule | Host-loopback authorization is separate from the egress rule. |
+| A container listener is unreachable | Bidirectional loopback support, both containers' policies, firewall rules, and the identity-less proxy inbound limitation |
+| An application hangs or gets `EACCES` when connecting to its own listener | [Known Windows loopback issue](#known-issue-intra-container-loopback) |
+| HTTP requests ignore the configured proxy | Prefer WinHTTP or a library that queries Windows proxy settings. For environment-based clients, confirm the library honors `HTTP_PROXY` and `HTTPS_PROXY`. |
