@@ -6,8 +6,10 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, 'feature/*', 'user/*']
   workflow_dispatch:
+  schedule:
+    - cron: '0 9 * * *'
 
 permissions:
   actions: write
@@ -62,6 +64,19 @@ jobs:
           }
           Get-Item $required | Format-Table FullName, Length
 
+      - name: Run MicroVM bundle integrity and host-only tests
+        shell: pwsh
+        working-directory: src
+        run: |
+          cargo test -p mxc-sdk --features microvm --lib backend_modules::nvx:: --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p mxc-sdk --features microvm --test nvx_bundle_integrity --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p mxc-sdk --features microvm --test nvx_e2e --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p mxc-sdk --features microvm --test nvx_e2e --target x86_64-pc-windows-msvc windows_x64::host_only_executor_request_matrix -- --ignored --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Diagnose hypervisor environment
         shell: pwsh
         run: ./scripts/ci/diagnose-whp.ps1
@@ -76,7 +91,7 @@ jobs:
         shell: pwsh
         working-directory: src
         run: |
-          cargo test -p mxc-sdk --features microvm --test wxc_e2e_tests_e2e_windows --target x86_64-pc-windows-msvc test_microvm_ -- --nocapture
+          cargo test -p mxc-sdk --features microvm --test wxc_e2e_tests_e2e_windows --target x86_64-pc-windows-msvc test_microvm_ -- --include-ignored --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test -p mxc-sdk --features microvm --test nvx_e2e --target x86_64-pc-windows-msvc -- --include-ignored --nocapture --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

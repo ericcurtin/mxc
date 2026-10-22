@@ -78,6 +78,9 @@ mod windows_x64 {
     use super::*;
 
     const BUNDLE_ENV: &str = "ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR";
+    const CAPTURE_LIMIT: usize = 64 * 1024 * 1024;
+    const CAPTURE_ERROR: &str =
+        "NVX signed bundled agent: combined stdout/stderr capture limit of 67108864 bytes exceeded";
     const MIXED_BACKEND_ERROR: &str = "Configuration parse error: Multiple containment backends \
         configured: 'containment' is 'microvm' (no per-backend section is defined for this \
         backend), but the config includes backend section(s): processContainer. Only one backend \
@@ -123,6 +126,18 @@ mod windows_x64 {
             ("parent-cwd", json!({"process": {"cwd": "/tmp/../escape"}})),
             ("relative-cwd", json!({"process": {"cwd": "relative"}})),
             (
+                "cwd-limit",
+                json!({"process": {"cwd": format!("/{}", "x".repeat(4095))}}),
+            ),
+            (
+                "cwd-multibyte-limit",
+                json!({"process": {"cwd": format!("/{}x", "\u{00e9}".repeat(2047))}}),
+            ),
+            (
+                "env-entry-limit",
+                json!({"process": {"env": vec!["KEY=value"; 257], "inheritDefaultEnv": true}}),
+            ),
+            (
                 "replacement-env",
                 json!({"process": {"env": ["KEY=value"]}}),
             ),
@@ -157,6 +172,41 @@ mod windows_x64 {
             }
         }
         request
+    }
+
+    fn valid_process_boundaries() -> Vec<(&'static str, Value)> {
+        vec![
+            (
+                "cwd-boundary",
+                json!({"process": {"cwd": format!("/{}", "x".repeat(4094))}}),
+            ),
+            (
+                "cwd-multibyte-boundary",
+                json!({"process": {"cwd": format!("/{}", "\u{00e9}".repeat(2047))}}),
+            ),
+            (
+                "env-entry-boundary",
+                json!({"process": {"env": vec!["KEY=value"; 256], "inheritDefaultEnv": true}}),
+            ),
+            (
+                "absent-env",
+                json!({"process": {"inheritDefaultEnv": true}}),
+            ),
+            (
+                "empty-env",
+                json!({"process": {"env": [], "inheritDefaultEnv": true}}),
+            ),
+        ]
+    }
+
+    fn process_limit_error(label: &str) -> Option<&'static str> {
+        match label {
+            "cwd-limit" | "cwd-multibyte-limit" => {
+                Some("NVX process.cwd must not exceed 4095 UTF-8 bytes")
+            }
+            "env-entry-limit" => Some("NVX process.env must not exceed 256 entries"),
+            _ => None,
+        }
     }
 
     #[test]
@@ -213,9 +263,32 @@ mod windows_x64 {
             } else if label == "fallback" {
                 assert_eq!(error.code, ErrorCode::PolicyValidation);
             }
+            if let Some(expected) = process_limit_error(label) {
+                assert_eq!(error.code, ErrorCode::PolicyValidation, "{label}");
+                assert_eq!(error.message, expected, "{label}");
+            }
             println!(
                 "HOST_ONLY rejected {label}: {:?}: {}",
                 error.code, error.message
+            );
+        }
+
+        for (label, patch) in valid_process_boundaries() {
+            let error =
+                mxc_sdk::__ffi::run_json(&request_with_patch(patch).to_string(), true).unwrap_err();
+            assert_eq!(
+                error.code,
+                ErrorCode::BackendUnavailable,
+                "{label}: {error:?}"
+            );
+            assert!(
+                error.message.contains("holds no agent bundle"),
+                "{label}: {error:?}"
+            );
+            assert_no_run_state(std::process::id());
+            println!(
+                "HOST_ONLY valid {label} reaches missing bundle: {}",
+                error.message
             );
         }
 
@@ -297,7 +370,23 @@ mod windows_x64 {
                 "{label} was not rejected before bundle discovery: {stderr}"
             );
             assert!(!String::from_utf8_lossy(&output.stdout).contains("forbidden"));
+            if let Some(expected) = process_limit_error(label) {
+                assert!(stderr.contains("policy_validation"), "{label}: {stderr}");
+                assert!(stderr.contains(expected), "{label}: {stderr}");
+            }
             println!("HOST_ONLY executor rejected {label}: {stderr}");
+        }
+        for (label, patch) in valid_process_boundaries() {
+            let output = executor_output(&request_with_patch(patch), true);
+            assert!(!output.status.success(), "missing bundle accepted {label}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("backend_unavailable"), "{label}: {stderr}");
+            assert!(
+                stderr.contains("holds no agent bundle"),
+                "{label}: {stderr}"
+            );
+            assert!(output.stdout.is_empty());
+            println!("HOST_ONLY executor valid {label} reaches missing bundle: {stderr}");
         }
     }
 
@@ -328,6 +417,164 @@ mod windows_x64 {
             .expect("real MXC signed bundled-agent create-and-run");
         assert_no_run_state(std::process::id());
         result
+    }
+
+    fn capture_boundary_request(stderr_bytes: usize) -> Value {
+        // Finite output bounds host memory and run time even if the capture guard regresses.
+        let mut request = process_only_request(&format!(
+            "head -c {} /dev/zero && head -c {stderr_bytes} /dev/zero >&2",
+            CAPTURE_LIMIT / 2
+        ));
+        request["process"]["timeout"] = json!(0);
+        request
+    }
+
+    fn assert_capture_boundary(stdout: &[u8], stderr: &[u8], stderr_bytes: usize) {
+        assert_eq!(stdout.len(), CAPTURE_LIMIT / 2);
+        assert_eq!(stderr.len(), stderr_bytes);
+        assert!(stdout.iter().chain(stderr).all(|&byte| byte == 0));
+    }
+
+    #[test]
+    #[ignore = "VM: requires Windows x64, WHP and the exact signed official bundle"]
+    fn signed_bundle_typed_image_and_filesystem_policy() {
+        use mxc_sdk::v1::{ContainerRequest, Containment, FilesystemPolicy, NetworkPolicy};
+
+        let directory = tempfile::tempdir().unwrap();
+        let ro = directory.path().join("ro");
+        let rw = directory.path().join("rw");
+        std::fs::create_dir(&ro).unwrap();
+        std::fs::create_dir(&rw).unwrap();
+        std::fs::write(ro.join("input"), b"read-ok").unwrap();
+        std::fs::write(rw.join("secret"), b"secret").unwrap();
+        let host_root = directory.path().to_str().unwrap();
+        assert_eq!(host_root.as_bytes()[1], b':', "drive-qualified host path");
+        let guest_root = format!(
+            "/mnt/{}/{}",
+            host_root[..1].to_ascii_lowercase(),
+            host_root[3..].replace('\\', "/")
+        );
+        let script = r#"python3 -c 'import errno, os, pathlib, sys
+assert sys.version_info[:2] == (3, 12)
+root = pathlib.Path(os.environ["MXC_NVX_POLICY_ROOT"])
+assert (root / "ro" / "input").read_bytes() == b"read-ok"
+try:
+    (root / "ro" / "input").write_bytes(b"forbidden")
+except OSError as error:
+    assert error.errno in (errno.EACCES, errno.EROFS), error
+else:
+    raise AssertionError("read-only mapping was writable")
+try:
+    (root / "rw" / "secret").read_bytes()
+except OSError as error:
+    assert error.errno == errno.EACCES, error
+else:
+    raise AssertionError("denied path was readable")
+(root / "rw" / "result").write_bytes(b"write-ok")
+print("NVX_TYPED_IMAGE_AND_POLICY_OK", end="")
+'"#;
+        let result = mxc_sdk::v1::experimental::run(
+            ContainerRequest {
+                containment: Containment::MicroVm {
+                    image: "python:3.12-alpine".to_owned(),
+                },
+                filesystem: Some(FilesystemPolicy {
+                    readonly_paths: vec![ro.to_str().unwrap().to_owned()],
+                    readwrite_paths: vec![rw.to_str().unwrap().to_owned()],
+                    denied_paths: vec![rw.join("secret").to_str().unwrap().to_owned()],
+                    ..Default::default()
+                }),
+                network: Some(NetworkPolicy::default()),
+                environment: Some(vec![("MXC_NVX_POLICY_ROOT".to_owned(), guest_root)]),
+                inherit_default_environment: Some(true),
+                timeout_ms: Some(30_000),
+                ..ContainerRequest::new(script)
+            },
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(result.outcome, WaitResult::Exited(0), "{result:?}");
+        assert_eq!(result.stdout, b"NVX_TYPED_IMAGE_AND_POLICY_OK");
+        assert_eq!(std::fs::read(ro.join("input")).unwrap(), b"read-ok");
+        assert_eq!(std::fs::read(rw.join("secret")).unwrap(), b"secret");
+        assert_eq!(std::fs::read(rw.join("result")).unwrap(), b"write-ok");
+        assert_no_run_state(std::process::id());
+        println!("VM_EXECUTED typed selected-image filesystem read/write/deny and cleanup");
+    }
+
+    #[test]
+    #[ignore = "VM: requires Windows x64, WHP and the exact signed official bundle"]
+    fn signed_bundle_deny_default_proxy_policy() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = stop.clone();
+        let server = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+            while !server_stop.load(Ordering::Acquire) {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") && request.len() < 8192 {
+                    stream.read_exact(&mut byte)?;
+                    request.push(byte[0]);
+                }
+                if !request.ends_with(b"\r\n\r\n") {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "proxy request headers exceed 8192 bytes",
+                    ));
+                }
+                stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nNVX_PROXY_OK",
+                )?;
+                return Ok(request);
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "workload did not reach the host proxy",
+            ))
+        });
+        let mut request = process_only_request(
+            r#"python3 -c 'import urllib.request; data = urllib.request.urlopen("http://mxc-policy.invalid/probe", timeout=10).read(); assert data == b"NVX_PROXY_OK", data; print(data.decode(), end="")'"#,
+        );
+        request["microvm"]["image"] = json!("python:3.12-alpine");
+        request["network"] = json!({
+            "egress": {"default": "deny"},
+            "ingress": {"default": "deny", "hostLoopback": "deny"}
+        });
+        request["runtimeConfig"] = json!({
+            "networkProxy": format!("http://127.0.0.1:{port}")
+        });
+        let result = mxc_sdk::__ffi::run_json(&request.to_string(), true);
+        stop.store(true, Ordering::Release);
+        let received = server.join().expect("host proxy thread");
+        let result = result.expect("proxy-only guest execution");
+        let received = received.expect("request must reach the host proxy");
+        assert!(
+            received.starts_with(b"GET http://mxc-policy.invalid/probe HTTP/1.1\r\n"),
+            "{}",
+            String::from_utf8_lossy(&received)
+        );
+        assert_eq!(result.outcome, WaitResult::Exited(0), "{result:?}");
+        assert_eq!(result.stdout, b"NVX_PROXY_OK");
+        assert_no_run_state(std::process::id());
+        println!("VM_EXECUTED deny-default proxy connectivity and cleanup");
     }
 
     #[test]
@@ -371,7 +618,24 @@ mod windows_x64 {
         let result = facade_run(process_only_request("printf after-timeout"));
         assert_eq!(result.outcome, WaitResult::Exited(0));
         assert_eq!(result.stdout, b"after-timeout");
-        println!("VM_EXECUTED facade sequential stdout/stderr/exit/env/cwd/timeout/cleanup");
+
+        for stderr_bytes in [CAPTURE_LIMIT / 2 - 1, CAPTURE_LIMIT / 2] {
+            let result = facade_run(capture_boundary_request(stderr_bytes));
+            assert_eq!(result.outcome, WaitResult::Exited(0));
+            assert_capture_boundary(&result.stdout, &result.stderr, stderr_bytes);
+        }
+        let error = mxc_sdk::__ffi::run_json(
+            &capture_boundary_request(CAPTURE_LIMIT / 2 + 1).to_string(),
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::BackendError);
+        assert_eq!(error.message, CAPTURE_ERROR);
+        assert_no_run_state(std::process::id());
+        let result = facade_run(process_only_request("printf after-overflow"));
+        assert_eq!(result.outcome, WaitResult::Exited(0));
+        assert_eq!(result.stdout, b"after-overflow");
+        println!("VM_EXECUTED facade sequential stdout/stderr/exit/env/cwd/timeout/capture-limit/cleanup");
     }
 
     #[test]
@@ -409,6 +673,25 @@ mod windows_x64 {
         let output = executor_output(&process_only_request("printf after-timeout"), false);
         assert_eq!(output.status.code(), Some(0));
         assert_eq!(output.stdout, b"after-timeout");
-        println!("VM_EXECUTED executor sequential stdout/stderr/exit/timeout/cleanup");
+        for stderr_bytes in [CAPTURE_LIMIT / 2 - 1, CAPTURE_LIMIT / 2] {
+            let output = executor_output(&capture_boundary_request(stderr_bytes), false);
+            assert_eq!(output.status.code(), Some(0));
+            assert_capture_boundary(&output.stdout, &output.stderr, stderr_bytes);
+        }
+        let output = executor_output(&capture_boundary_request(CAPTURE_LIMIT / 2 + 1), false);
+        assert_eq!(output.status.code(), Some(-1));
+        assert!(
+            output.stdout.is_empty(),
+            "overflow must not relay partial output"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(CAPTURE_ERROR), "{stderr}");
+        assert!(!stderr.contains("NVX workload timed out"), "{stderr}");
+        let output = executor_output(&process_only_request("printf after-overflow"), false);
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(output.stdout, b"after-overflow");
+        println!(
+            "VM_EXECUTED executor sequential stdout/stderr/exit/timeout/capture-limit/cleanup"
+        );
     }
 }
