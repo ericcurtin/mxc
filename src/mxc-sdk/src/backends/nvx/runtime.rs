@@ -33,6 +33,7 @@ pub(super) const APPROVED_INITRD_SHA256: &str =
 
 const DEFAULT_IMAGE_REFERENCE: &str = "mcr.microsoft.com/azurelinux/base/core:3.0";
 const HOST_TIMEOUT_SLACK_MS: u64 = 30_000;
+const CAPTURE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SandboxId {
@@ -77,6 +78,7 @@ pub(super) struct ExecOutput {
 }
 
 pub(super) trait SandboxClient {
+    fn validate_exec(&self, request: &ExecRequest) -> Result<(), MxcError>;
     fn probe(&self) -> Result<(), MxcError>;
     fn provision(&self) -> Result<SandboxId, MxcError>;
     fn start(&self, sandbox_id: &SandboxId) -> Result<(), MxcError>;
@@ -308,32 +310,12 @@ fn append_cleanup_error(primary: &mut MxcError, cleanup: MxcError) {
     primary.message.push_str(&cleanup.to_string());
 }
 
-impl SandboxClient for NvxClient {
-    fn probe(&self) -> Result<(), MxcError> {
-        self.library.probe(self.host)
-    }
-
-    fn provision(&self) -> Result<SandboxId, MxcError> {
-        let reply = self.library.provision(
-            self.host,
-            &ProvisionInput {
-                request: ProvisionRequest {},
-                spec: sandbox_spec(),
-            },
-        )?;
-        SandboxId::from_token(&reply.token)
-    }
-
-    fn start(&self, sandbox_id: &SandboxId) -> Result<(), MxcError> {
-        self.library
-            .start(self.host, sandbox_id.token())
-            .map(|_| ())
-    }
-
-    fn exec_and_wait(
+impl NvxClient {
+    fn exec_and_wait_with_capture_limit(
         &self,
         sandbox_id: &SandboxId,
         request: &ExecRequest,
+        capture_limit: usize,
     ) -> Result<ExecOutput, MxcError> {
         let exec_handle = self.library.exec(
             self.host,
@@ -362,22 +344,34 @@ impl SandboxClient for NvxClient {
                     .exec_next(
                         exec_handle,
                         remaining_timeout_ms(deadline),
-                        |event| match event {
-                            Event::Stdout(bytes) => {
-                                stdout.extend_from_slice(bytes);
-                                None
+                        |event| {
+                            let captured = stdout.len() + stderr.len();
+                            let (buffer, bytes) = match event {
+                                Event::Stdout(bytes) => (&mut stdout, bytes),
+                                Event::Stderr(bytes) => (&mut stderr, bytes),
+                                Event::Exit(bytes) => {
+                                    return serde_json::from_slice::<ExecEnd>(bytes)
+                                        .map(Some)
+                                        .map_err(|parse_error| MxcError::backend_error(format!(
+                                            "NVX signed bundled agent: the agent library returned a malformed execution end: {parse_error}"
+                                        )));
+                                }
+                            };
+                            // Check the combined budget before either buffer can grow.
+                            if bytes.len() > capture_limit - captured {
+                                return Err(MxcError::backend_error(format!(
+                                    "NVX signed bundled agent: combined stdout/stderr capture limit of {capture_limit} bytes exceeded"
+                                )));
                             }
-                            Event::Stderr(bytes) => {
-                                stderr.extend_from_slice(bytes);
-                                None
-                            }
-                            Event::Exit(bytes) => Some(serde_json::from_slice::<ExecEnd>(bytes)),
+                            buffer.extend_from_slice(bytes);
+                            Ok(None)
                         },
-                    );
+                    )
+                    .and_then(|step| step.transpose());
 
             match step {
                 Ok(Some(None)) => {}
-                Ok(Some(Some(Ok(ExecEnd::Outcome(outcome))))) => {
+                Ok(Some(Some(ExecEnd::Outcome(outcome)))) => {
                     guard.release()?;
                     return Ok(ExecOutput {
                         outcome,
@@ -385,19 +379,10 @@ impl SandboxClient for NvxClient {
                         stderr,
                     });
                 }
-                Ok(Some(Some(Ok(ExecEnd::Error(body))))) => {
+                Ok(Some(Some(ExecEnd::Error(body)))) => {
                     let mut error = map_error_body(body);
                     if let Err(release_error) = guard.release() {
                         append_cleanup_error(&mut error, release_error);
-                    }
-                    return Err(error);
-                }
-                Ok(Some(Some(Err(parse_error)))) => {
-                    let mut error = MxcError::backend_error(format!(
-                        "NVX signed bundled agent: the agent library returned a malformed execution end: {parse_error}"
-                    ));
-                    if let Err(cleanup_error) = guard.cancel_and_release() {
-                        append_cleanup_error(&mut error, cleanup_error);
                     }
                     return Err(error);
                 }
@@ -417,6 +402,41 @@ impl SandboxClient for NvxClient {
                 }
             }
         }
+    }
+}
+
+impl SandboxClient for NvxClient {
+    fn validate_exec(&self, request: &ExecRequest) -> Result<(), MxcError> {
+        self.library.validate_exec(self.host, request)
+    }
+
+    fn probe(&self) -> Result<(), MxcError> {
+        self.library.probe(self.host)
+    }
+
+    fn provision(&self) -> Result<SandboxId, MxcError> {
+        let reply = self.library.provision(
+            self.host,
+            &ProvisionInput {
+                request: ProvisionRequest {},
+                spec: sandbox_spec(),
+            },
+        )?;
+        SandboxId::from_token(&reply.token)
+    }
+
+    fn start(&self, sandbox_id: &SandboxId) -> Result<(), MxcError> {
+        self.library
+            .start(self.host, sandbox_id.token())
+            .map(|_| ())
+    }
+
+    fn exec_and_wait(
+        &self,
+        sandbox_id: &SandboxId,
+        request: &ExecRequest,
+    ) -> Result<ExecOutput, MxcError> {
+        self.exec_and_wait_with_capture_limit(sandbox_id, request, CAPTURE_LIMIT_BYTES)
     }
 
     fn stop(&self, sandbox_id: &SandboxId) -> Result<(), MxcError> {
@@ -531,6 +551,9 @@ mod tests {
         calls: Vec<&'static str>,
         cancel_status: i32,
         release_status: i32,
+        timeouts: Vec<i64>,
+        validation_input: Option<serde_json::Value>,
+        validation_error: Option<ErrorBody>,
     }
 
     static FAKE_EXECS: OnceLock<Mutex<std::collections::BTreeMap<u64, FakeExecState>>> =
@@ -551,6 +574,9 @@ mod tests {
                     calls: Vec::new(),
                     cancel_status: STATUS_OK,
                     release_status: STATUS_OK,
+                    timeouts: Vec::new(),
+                    validation_input: None,
+                    validation_error: None,
                 },
             );
         handle
@@ -663,6 +689,34 @@ mod tests {
         STATUS_INVALID_HANDLE
     }
 
+    unsafe extern "C" fn fake_validate_exec(
+        host: u64,
+        input: *const u8,
+        input_len: usize,
+        out: *mut *mut u8,
+        len: *mut usize,
+    ) -> i32 {
+        let mut map = FAKE_EXECS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(state) = map.get_mut(&host) else {
+            return STATUS_INVALID_HANDLE;
+        };
+        state.calls.push("validate");
+        let input = unsafe { std::slice::from_raw_parts(input, input_len) };
+        let Ok(value) = serde_json::from_slice(input) else {
+            return STATUS_INVALID_ARGUMENT;
+        };
+        state.validation_input = Some(value);
+        if let Some(error) = &state.validation_error {
+            alloc_buf(&serde_json::to_vec(error).unwrap(), out, len);
+            STATUS_ERROR
+        } else {
+            STATUS_OK
+        }
+    }
+
     unsafe extern "C" fn fake_exec(
         host: u64,
         _tok_ptr: *const u8,
@@ -677,7 +731,7 @@ mod tests {
         STATUS_OK
     }
 
-    unsafe extern "C" fn fake_exec_next(handle: u64, _timeout: i64, event: *mut ExecEvent) -> i32 {
+    unsafe extern "C" fn fake_exec_next(handle: u64, timeout: i64, event: *mut ExecEvent) -> i32 {
         let mut map = FAKE_EXECS
             .get_or_init(Default::default)
             .lock()
@@ -685,6 +739,7 @@ mod tests {
         let Some(state) = map.get_mut(&handle) else {
             return STATUS_INVALID_HANDLE;
         };
+        state.timeouts.push(timeout);
         match state.steps.pop_front() {
             Some(FakeStep::Event {
                 kind,
@@ -743,7 +798,7 @@ mod tests {
                 capabilities: fake_query_invalid,
                 probe: fake_probe,
                 validate_provision: fake_call_invalid,
-                validate_exec: fake_call_invalid,
+                validate_exec: fake_validate_exec,
                 provision: fake_call_invalid,
                 start: fake_call_invalid,
                 stop: fake_call_invalid,
@@ -867,6 +922,215 @@ mod tests {
         assert!(err.message.contains("rejected an argument"));
         assert_eq!(fake_calls(handle), ["cancel", "release"]);
         let _ = client.close();
+    }
+
+    #[test]
+    fn native_validation_sends_the_direct_request_and_preserves_native_error_codes() {
+        let request = ExecRequest::command_line("printf '%s' \"$KEY\"")
+            .with_timeout_ms(250)
+            .with_cwd("/tmp".to_owned())
+            .with_envs(vec!["KEY=first".to_owned(), "KEY=last".to_owned()])
+            .with_inherit_default_env(true);
+        for failure in [
+            None,
+            Some((
+                WireErrorCode::PolicyValidation,
+                MxcErrorCode::PolicyValidation,
+            )),
+            Some((
+                WireErrorCode::MalformedRequest,
+                MxcErrorCode::MalformedRequest,
+            )),
+            Some((
+                WireErrorCode::BackendUnavailable,
+                MxcErrorCode::BackendUnavailable,
+            )),
+        ] {
+            let handle = register_fake_exec(Vec::new());
+            if let Some((code, _)) = failure {
+                FAKE_EXECS
+                    .get()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .get_mut(&handle)
+                    .unwrap()
+                    .validation_error = Some(ErrorBody {
+                    code,
+                    message: "native validation rejected request".to_owned(),
+                });
+            }
+            let mut client = NvxClient::from_library(fake_library(), handle);
+            let result = client.validate_exec(&request);
+            if let Some((_, code)) = failure {
+                let error = result.unwrap_err();
+                assert_eq!(error.code, code);
+                assert_eq!(
+                    error.message,
+                    "NVX signed bundled agent: native validation rejected request"
+                );
+            } else {
+                result.unwrap();
+            }
+            assert_eq!(fake_calls(handle), ["validate"]);
+            let input = FAKE_EXECS
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .get(&handle)
+                .unwrap()
+                .validation_input
+                .clone()
+                .unwrap();
+            assert_eq!(
+                input,
+                serde_json::json!({
+                    "process": {
+                        "commandLine": "printf '%s' \"$KEY\"",
+                        "timeout": 250,
+                        "cwd": "/tmp",
+                        "env": ["KEY=first", "KEY=last"],
+                        "inheritDefaultEnv": true
+                    }
+                })
+            );
+            client.close().unwrap();
+        }
+    }
+
+    #[test]
+    fn real_staged_native_validation_checks_process_limits_without_provisioning() {
+        let state_root = tempfile::tempdir().unwrap();
+        let mut client = create_client(state_root.path()).unwrap();
+        let command = ExecRequest::command_line("printf forbidden");
+        client.validate_exec(&command).unwrap();
+        let boundary = command
+            .clone()
+            .with_cwd(format!("/{}", "\u{00e9}".repeat(2047)))
+            .with_envs(vec!["KEY=value".to_owned(); 256])
+            .with_inherit_default_env(true);
+        client.validate_exec(&boundary).unwrap();
+        for invalid in [
+            boundary
+                .clone()
+                .with_cwd(format!("/{}x", "\u{00e9}".repeat(2047))),
+            boundary.with_envs(vec!["KEY=value".to_owned(); 257]),
+        ] {
+            let error = client.validate_exec(&invalid).unwrap_err();
+            assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+        }
+        client.close().unwrap();
+        state_root.close().unwrap();
+    }
+
+    #[test]
+    fn capture_limit_preserves_bytes_at_and_below_the_combined_boundary() {
+        let sandbox_id = SandboxId::from_token("0123456789abcdef0123456789abcdef").unwrap();
+        let request = ExecRequest::command_line("test").with_timeout_ms(0);
+        assert_eq!(CAPTURE_LIMIT_BYTES, 67_108_864);
+
+        for stderr in [b"\x80\0\x81".as_slice(), b"\x80\0\x81x".as_slice()] {
+            let handle = register_fake_exec(vec![
+                FakeStep::Event {
+                    kind: EVENT_STDOUT,
+                    bytes: Some(b"\xff\0\xfex".to_vec()),
+                    reported_len: None,
+                },
+                FakeStep::Event {
+                    kind: EVENT_STDERR,
+                    bytes: Some(stderr.to_vec()),
+                    reported_len: None,
+                },
+                FakeStep::Event {
+                    kind: EVENT_STDOUT,
+                    bytes: Some(Vec::new()),
+                    reported_len: None,
+                },
+                FakeStep::Event {
+                    kind: EVENT_EXIT,
+                    bytes: Some(br#"{"outcome":{"exited":42}}"#.to_vec()),
+                    reported_len: None,
+                },
+            ]);
+            let mut client = NvxClient::from_library(fake_library(), handle);
+            let output = client
+                .exec_and_wait_with_capture_limit(&sandbox_id, &request, 8)
+                .unwrap();
+            assert_eq!(output.outcome, ExecOutcome::Exited(42));
+            assert_eq!(output.stdout, b"\xff\0\xfex");
+            assert_eq!(output.stderr, stderr);
+            assert_eq!(fake_calls(handle), ["release"]);
+            client.close().unwrap();
+        }
+    }
+
+    #[test]
+    fn capture_overflow_cancels_releases_and_preserves_cleanup_failures_without_a_timeout() {
+        let sandbox_id = SandboxId::from_token("0123456789abcdef0123456789abcdef").unwrap();
+        let request = ExecRequest::command_line("test").with_timeout_ms(0);
+        for (first_kind, second_kind, first_bytes, second_bytes) in [
+            (EVENT_STDOUT, EVENT_STDERR, 4, 5),
+            (EVENT_STDERR, EVENT_STDOUT, 4, 5),
+            (EVENT_STDOUT, EVENT_STDOUT, 8, 1),
+            (EVENT_STDERR, EVENT_STDERR, 0, 9),
+        ] {
+            for cleanup_fails in [false, true] {
+                let handle = register_fake_exec(vec![
+                    FakeStep::Event {
+                        kind: first_kind,
+                        bytes: Some(vec![b'a'; first_bytes]),
+                        reported_len: None,
+                    },
+                    FakeStep::Event {
+                        kind: second_kind,
+                        bytes: Some(vec![b'b'; second_bytes]),
+                        reported_len: None,
+                    },
+                    FakeStep::Event {
+                        kind: EVENT_EXIT,
+                        bytes: Some(br#"{"outcome":{"exited":0}}"#.to_vec()),
+                        reported_len: None,
+                    },
+                ]);
+                if cleanup_fails {
+                    let mut map = FAKE_EXECS.get().unwrap().lock().unwrap();
+                    let state = map.get_mut(&handle).unwrap();
+                    state.cancel_status = STATUS_INVALID_ARGUMENT;
+                    state.release_status = STATUS_INVALID_HANDLE;
+                }
+                let mut client = NvxClient::from_library(fake_library(), handle);
+                let error = client
+                    .exec_and_wait_with_capture_limit(&sandbox_id, &request, 8)
+                    .unwrap_err();
+                assert_eq!(error.code, MxcErrorCode::BackendError);
+                let primary = "NVX signed bundled agent: combined stdout/stderr capture limit of 8 bytes exceeded";
+                if cleanup_fails {
+                    assert!(error.message.starts_with(primary));
+                    assert!(error.message.contains("; cleanup failure: "));
+                    assert!(error.message.contains("rejected an argument"));
+                    assert!(error.message.contains("; release failure: "));
+                    assert!(error.message.contains("unknown handle"));
+                } else {
+                    assert_eq!(error.message, primary);
+                }
+                assert_eq!(fake_calls(handle), ["cancel", "release"]);
+                {
+                    let map = FAKE_EXECS.get().unwrap().lock().unwrap();
+                    let state = map.get(&handle).unwrap();
+                    assert_eq!(
+                        state.steps.len(),
+                        1,
+                        "must not consume the exit after overflow"
+                    );
+                    assert_eq!(state.timeouts, [-1, -1]);
+                }
+                // The fake host uses the same handle, so inspect execution cleanup before close.
+                client.close().unwrap_or_else(|error| {
+                    assert!(cleanup_fails, "unexpected close error: {error}");
+                });
+            }
+        }
     }
 
     #[test]

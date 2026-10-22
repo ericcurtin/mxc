@@ -664,6 +664,13 @@ impl AgentLibrary {
         })
     }
 
+    pub fn validate_exec(&self, host: u64, request: &ExecRequest) -> Result<(), MxcError> {
+        let encoded = encode_json(request)?;
+        self.call_empty("validate_exec", |out, length| unsafe {
+            (self.exports.validate_exec)(host, encoded.as_ptr(), encoded.len(), out, length)
+        })
+    }
+
     pub fn provision(&self, host: u64, input: &ProvisionInput) -> Result<ProvisionReply, MxcError> {
         let encoded = encode_json(input)?;
         let reply = self.with_input(self.exports.provision, host, &encoded)?;

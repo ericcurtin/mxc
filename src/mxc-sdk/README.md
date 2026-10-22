@@ -194,10 +194,24 @@ Distribute the complete `aci-edge-sandboxes/` directory beside the consuming
 executable. The native agent pulls the official example's public Azure Linux
 workload image on the host; guest network access remains ungranted.
 
+NVX captures at most 64 MiB (67,108,864 bytes) of stdout and stderr combined,
+including when the process timeout is zero. Output up to that limit is returned
+unchanged. Exceeding it cancels and releases the execution, tears down the
+container, and returns `BackendError` instead of truncated output. Cleanup
+failures are reported alongside the capture-limit error.
+
 The host requires Windows Hypervisor Platform and hardware virtualization.
 Requests cannot include filesystem grants or denials, network or proxy policy,
 UI policy, or capture-denials. Containers must be destroyed after execution,
 without preserving policy.
+
+The guest working directory must be absolute, contain no `..` path components,
+and use at most 4095 UTF-8 bytes. Additive environment settings require
+`inheritDefaultEnv: true` and allow at most 256 entries and 32 KiB including
+entry terminators. Repeated names count as separate entries; later entries
+override earlier ones. MXC rejects these limits before bundle discovery and
+validates the mapped execution request with the native agent before probing
+the host or provisioning a container.
 
 Backend implementations, shared runtime support, backend dispatch, and host
 probing are internal modules of this published crate. The crate root exposes

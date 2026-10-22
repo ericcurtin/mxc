@@ -33,6 +33,9 @@ mod windows_x64 {
     use super::*;
 
     const BUNDLE_ENV: &str = "ACI_EDGE_SANDBOXES_AGENT_ARTIFACTS_DIR";
+    const CAPTURE_LIMIT: usize = 64 * 1024 * 1024;
+    const CAPTURE_ERROR: &str =
+        "NVX signed bundled agent: combined stdout/stderr capture limit of 67108864 bytes exceeded";
     const MIXED_BACKEND_ERROR: &str = "Configuration parse error: Multiple containment backends \
         configured: 'containment' is 'microvm' (no per-backend section is defined for this \
         backend), but the config includes backend section(s): processContainer. Only one backend \
@@ -103,6 +106,18 @@ mod windows_x64 {
             ("parent-cwd", json!({"process": {"cwd": "/tmp/../escape"}})),
             ("relative-cwd", json!({"process": {"cwd": "relative"}})),
             (
+                "cwd-limit",
+                json!({"process": {"cwd": format!("/{}", "x".repeat(4095))}}),
+            ),
+            (
+                "cwd-multibyte-limit",
+                json!({"process": {"cwd": format!("/{}x", "\u{00e9}".repeat(2047))}}),
+            ),
+            (
+                "env-entry-limit",
+                json!({"process": {"env": vec!["KEY=value"; 257], "inheritDefaultEnv": true}}),
+            ),
+            (
                 "replacement-env",
                 json!({"process": {"env": ["KEY=value"]}}),
             ),
@@ -137,6 +152,41 @@ mod windows_x64 {
             }
         }
         request
+    }
+
+    fn valid_process_boundaries() -> Vec<(&'static str, Value)> {
+        vec![
+            (
+                "cwd-boundary",
+                json!({"process": {"cwd": format!("/{}", "x".repeat(4094))}}),
+            ),
+            (
+                "cwd-multibyte-boundary",
+                json!({"process": {"cwd": format!("/{}", "\u{00e9}".repeat(2047))}}),
+            ),
+            (
+                "env-entry-boundary",
+                json!({"process": {"env": vec!["KEY=value"; 256], "inheritDefaultEnv": true}}),
+            ),
+            (
+                "absent-env",
+                json!({"process": {"inheritDefaultEnv": true}}),
+            ),
+            (
+                "empty-env",
+                json!({"process": {"env": [], "inheritDefaultEnv": true}}),
+            ),
+        ]
+    }
+
+    fn process_limit_error(label: &str) -> Option<&'static str> {
+        match label {
+            "cwd-limit" | "cwd-multibyte-limit" => {
+                Some("NVX process.cwd must not exceed 4095 UTF-8 bytes")
+            }
+            "env-entry-limit" => Some("NVX process.env must not exceed 256 entries"),
+            _ => None,
+        }
     }
 
     #[test]
@@ -193,9 +243,32 @@ mod windows_x64 {
             } else if label == "fallback" {
                 assert_eq!(error.code, ErrorCode::PolicyValidation);
             }
+            if let Some(expected) = process_limit_error(label) {
+                assert_eq!(error.code, ErrorCode::PolicyValidation, "{label}");
+                assert_eq!(error.message, expected, "{label}");
+            }
             println!(
                 "HOST_ONLY rejected {label}: {:?}: {}",
                 error.code, error.message
+            );
+        }
+
+        for (label, patch) in valid_process_boundaries() {
+            let error =
+                mxc_sdk::__ffi::run_json(&request_with_patch(patch).to_string(), true).unwrap_err();
+            assert_eq!(
+                error.code,
+                ErrorCode::BackendUnavailable,
+                "{label}: {error:?}"
+            );
+            assert!(
+                error.message.contains("holds no agent bundle"),
+                "{label}: {error:?}"
+            );
+            assert_no_run_state(std::process::id());
+            println!(
+                "HOST_ONLY valid {label} reaches missing bundle: {}",
+                error.message
             );
         }
 
@@ -277,7 +350,23 @@ mod windows_x64 {
                 "{label} was not rejected before bundle discovery: {stderr}"
             );
             assert!(!String::from_utf8_lossy(&output.stdout).contains("forbidden"));
+            if let Some(expected) = process_limit_error(label) {
+                assert!(stderr.contains("policy_validation"), "{label}: {stderr}");
+                assert!(stderr.contains(expected), "{label}: {stderr}");
+            }
             println!("HOST_ONLY executor rejected {label}: {stderr}");
+        }
+        for (label, patch) in valid_process_boundaries() {
+            let output = executor_output(&request_with_patch(patch), true);
+            assert!(!output.status.success(), "missing bundle accepted {label}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("backend_unavailable"), "{label}: {stderr}");
+            assert!(
+                stderr.contains("holds no agent bundle"),
+                "{label}: {stderr}"
+            );
+            assert!(output.stdout.is_empty());
+            println!("HOST_ONLY executor valid {label} reaches missing bundle: {stderr}");
         }
     }
 
@@ -308,6 +397,22 @@ mod windows_x64 {
             .expect("real MXC signed bundled-agent create-and-run");
         assert_no_run_state(std::process::id());
         result
+    }
+
+    fn capture_boundary_request(stderr_bytes: usize) -> Value {
+        // Finite output bounds host memory and run time even if the capture guard regresses.
+        let mut request = process_only_request(&format!(
+            "head -c {} /dev/zero && head -c {stderr_bytes} /dev/zero >&2",
+            CAPTURE_LIMIT / 2
+        ));
+        request["process"]["timeout"] = json!(0);
+        request
+    }
+
+    fn assert_capture_boundary(stdout: &[u8], stderr: &[u8], stderr_bytes: usize) {
+        assert_eq!(stdout.len(), CAPTURE_LIMIT / 2);
+        assert_eq!(stderr.len(), stderr_bytes);
+        assert!(stdout.iter().chain(stderr).all(|&byte| byte == 0));
     }
 
     #[test]
@@ -351,7 +456,24 @@ mod windows_x64 {
         let result = facade_run(process_only_request("printf after-timeout"));
         assert_eq!(result.outcome, WaitResult::Exited(0));
         assert_eq!(result.stdout, b"after-timeout");
-        println!("VM_EXECUTED facade sequential stdout/stderr/exit/env/cwd/timeout/cleanup");
+
+        for stderr_bytes in [CAPTURE_LIMIT / 2 - 1, CAPTURE_LIMIT / 2] {
+            let result = facade_run(capture_boundary_request(stderr_bytes));
+            assert_eq!(result.outcome, WaitResult::Exited(0));
+            assert_capture_boundary(&result.stdout, &result.stderr, stderr_bytes);
+        }
+        let error = mxc_sdk::__ffi::run_json(
+            &capture_boundary_request(CAPTURE_LIMIT / 2 + 1).to_string(),
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::BackendError);
+        assert_eq!(error.message, CAPTURE_ERROR);
+        assert_no_run_state(std::process::id());
+        let result = facade_run(process_only_request("printf after-overflow"));
+        assert_eq!(result.outcome, WaitResult::Exited(0));
+        assert_eq!(result.stdout, b"after-overflow");
+        println!("VM_EXECUTED facade sequential stdout/stderr/exit/env/cwd/timeout/capture-limit/cleanup");
     }
 
     #[test]
@@ -389,6 +511,25 @@ mod windows_x64 {
         let output = executor_output(&process_only_request("printf after-timeout"), false);
         assert_eq!(output.status.code(), Some(0));
         assert_eq!(output.stdout, b"after-timeout");
-        println!("VM_EXECUTED executor sequential stdout/stderr/exit/timeout/cleanup");
+        for stderr_bytes in [CAPTURE_LIMIT / 2 - 1, CAPTURE_LIMIT / 2] {
+            let output = executor_output(&capture_boundary_request(stderr_bytes), false);
+            assert_eq!(output.status.code(), Some(0));
+            assert_capture_boundary(&output.stdout, &output.stderr, stderr_bytes);
+        }
+        let output = executor_output(&capture_boundary_request(CAPTURE_LIMIT / 2 + 1), false);
+        assert_eq!(output.status.code(), Some(-1));
+        assert!(
+            output.stdout.is_empty(),
+            "overflow must not relay partial output"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(CAPTURE_ERROR), "{stderr}");
+        assert!(!stderr.contains("NVX workload timed out"), "{stderr}");
+        let output = executor_output(&process_only_request("printf after-overflow"), false);
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(output.stdout, b"after-overflow");
+        println!(
+            "VM_EXECUTED executor sequential stdout/stderr/exit/timeout/capture-limit/cleanup"
+        );
     }
 }

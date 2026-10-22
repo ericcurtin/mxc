@@ -6,6 +6,8 @@ use crate::mxc_common::mxc_error::MxcError;
 
 const MAX_TIMEOUT_MS: u32 = 3_600_000;
 const MAX_ENVIRONMENT_BYTES: usize = 32 * 1024;
+const MAX_ENVIRONMENT_ENTRIES: usize = 256;
+const MAX_CWD_BYTES: usize = 4095;
 const PROXY_ENVIRONMENT_KEYS: [&str; 4] = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
 
 pub(super) fn validate_request(request: &ExecutionRequest) -> Result<(), MxcError> {
@@ -99,10 +101,20 @@ fn validate_process(request: &ExecutionRequest) -> Result<(), MxcError> {
             "NVX process.cwd must be an absolute POSIX guest path",
         ));
     }
+    if request.working_directory.len() > MAX_CWD_BYTES {
+        return Err(MxcError::policy_validation(
+            "NVX process.cwd must not exceed 4095 UTF-8 bytes",
+        ));
+    }
     if let Some(environment) = &request.env {
         if !request.inherit_default_env {
             return Err(MxcError::policy_validation(
                 "NVX process.env requires inheritDefaultEnv=true",
+            ));
+        }
+        if environment.len() > MAX_ENVIRONMENT_ENTRIES {
+            return Err(MxcError::policy_validation(
+                "NVX process.env must not exceed 256 entries",
             ));
         }
         let bytes = environment
@@ -220,6 +232,35 @@ mod tests {
         let mut timeout = request();
         timeout.script_timeout = MAX_TIMEOUT_MS + 1;
         assert_policy_error(&timeout, "one hour");
+    }
+
+    #[test]
+    fn environment_entry_limit_counts_duplicates_and_preserves_absent_and_empty() {
+        let mut request = request();
+        assert!(validate_request(&request).is_ok());
+        request.env = Some(Vec::new());
+        assert_policy_error(&request, "inheritDefaultEnv=true");
+        request.inherit_default_env = true;
+        assert!(validate_request(&request).is_ok());
+        request.env = Some(vec!["KEY=value".to_owned(); MAX_ENVIRONMENT_ENTRIES]);
+        assert!(validate_request(&request).is_ok());
+        request.env.as_mut().unwrap().push("KEY=later".to_owned());
+        assert_policy_error(&request, "must not exceed 256 entries");
+    }
+
+    #[test]
+    fn cwd_limit_counts_utf8_bytes_instead_of_characters() {
+        let mut request = request();
+        for directory in [
+            format!("/{}", "x".repeat(MAX_CWD_BYTES - 1)),
+            format!("/{}", "\u{00e9}".repeat((MAX_CWD_BYTES - 1) / 2)),
+        ] {
+            assert_eq!(directory.len(), MAX_CWD_BYTES);
+            request.working_directory = directory;
+            assert!(validate_request(&request).is_ok());
+            request.working_directory.push('x');
+            assert_policy_error(&request, "must not exceed 4095 UTF-8 bytes");
+        }
     }
 
     #[test]

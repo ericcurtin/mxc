@@ -338,7 +338,7 @@ use:
 | Seatbelt (macOS) | Same precedence, with `~` expanded as the profile expands it; falls back to `/`. |
 | Bubblewrap (Linux) | No substitution — a policy grant is never adopted. `--chdir` is emitted only for an explicit `process.cwd`, which from 0.9 is also normalized against the sandbox root and used as `HOME`. With no explicit `cwd` there is no `--chdir` and `HOME` is unset — see [`docs/backends/bwrap/bubblewrap-backend.md`](backends/bwrap/bubblewrap-backend.md). |
 | LXC / WSL Container | The container root — see [`docs/backends/lxc/lxc-backend.md`](backends/lxc/lxc-backend.md). |
-| MicroVM | NVX on Windows x64 accepts an absolute guest working directory. Linux MicroVM execution is inactive in this phase. |
+| MicroVM | NVX on Windows x64 accepts an absolute guest working directory with no `..` components and at most 4095 UTF-8 bytes. Linux MicroVM execution is inactive in this phase. |
 | Hyperlight | Not applicable — this backend rejects a working directory outright. |
 
 Policy entries that are blank, name a file, or do not exist yet are skipped:
@@ -380,6 +380,11 @@ What the default block contains is backend-specific; see the backend's guide.
 On the WSL Container backend it is the container image's own `ENV`, which MXC
 neither authors nor enumerates — see
 [`docs/backends/wslc/wsl-container-getting-started.md`](backends/wslc/wsl-container-getting-started.md#environment).
+
+NVX on Windows x64 requires `process.inheritDefaultEnv: true` when
+`process.env` is present. It accepts at most 256 entries and 32 KiB including
+entry terminators. Repeated names count as separate entries, with later entries
+overriding earlier ones.
 
 ### Filesystem Policy
 
