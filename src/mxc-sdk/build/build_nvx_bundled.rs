@@ -98,15 +98,13 @@ pub(crate) const OFFICIAL_BUNDLE_FILES: &[(&str, &str)] = &[
 pub(crate) fn run() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_MICROVM");
     println!("cargo:rerun-if-env-changed={BUNDLE_DIR_ENV}");
-    if std::env::var_os("CARGO_FEATURE_MICROVM").is_none()
-        || std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
-        || std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("x86_64")
-    {
-        return;
-    }
-
     #[cfg(feature = "microvm")]
-    stage_official_bundle();
+    if std::env::var_os("CARGO_FEATURE_MICROVM").is_some()
+        && std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64")
+    {
+        stage_official_bundle();
+    }
 }
 
 #[cfg(feature = "microvm")]
