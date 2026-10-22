@@ -153,6 +153,8 @@ $scriptsOut = New-Directory (Join-Path $OutputDirectory 'test_scripts')
 foreach ($name in 'run_isolation_session_tests.ps1', 'run_isolation_session_state_aware_tests.ps1', 'run_isolation_session_resize_smoke.ps1') {
     Copy-Item -LiteralPath (Join-Path $repoRoot "tests\scripts\$name") -Destination $scriptsOut
 }
+$helperPaths = @(& (Join-Path $PSScriptRoot 'stage-isolation-session-test-helpers.ps1') `
+    -SourceDirectory (Join-Path $repoRoot 'tests\scripts') -ScriptsDirectory $scriptsOut)
 
 $integrationOut = New-Directory (Join-Path $OutputDirectory 'sdk-integration')
 Copy-Item -Path (Join-Path $integrationRoot 'dist\isolation-session-*.test.js'), (Join-Path $integrationRoot 'dist\test-helpers.js') -Destination (New-Directory (Join-Path $integrationOut 'dist'))
@@ -204,6 +206,7 @@ $required = @(
     'test_scripts\run_isolation_session_state_aware_tests.ps1',
     'test_scripts\run_isolation_session_resize_smoke.ps1'
 )
+$required += @($helperPaths | ForEach-Object { Join-Path 'test_scripts' $_ })
 foreach ($relativePath in $required) {
     if (-not (Test-Path -LiteralPath (Join-Path $OutputDirectory $relativePath) -PathType Leaf)) {
         throw "The bundle is missing $relativePath."
