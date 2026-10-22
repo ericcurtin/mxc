@@ -277,6 +277,9 @@ function ConvertTo-StateAwareInvocation {
 
 # Launch one state-aware phase and return without waiting, so a caller can start
 # another phase while this one is still running. Complete it with Wait-StateAware.
+# With -WriteStdin the handle's Stdin is a writable stream the caller writes and
+# closes; with -StdinFile, cmd.exe redirects that file (or NUL) onto stdin, as
+# `wxc-exec ... < file` would.
 #
 # Drive wxc-exec via System.Diagnostics.Process rather than Start-Process
 # -Wait: the state-aware phase process exits as soon as it has driven the
@@ -294,7 +297,9 @@ function Start-StateAware {
         [string]$SandboxId,
         [string]$SessionId,
         [int]$WindowsPort,
-        [switch]$DryRun
+        [switch]$DryRun,
+        [switch]$WriteStdin,
+        [string]$StdinFile
     )
 
     $invocation = ConvertTo-StateAwareInvocation `
@@ -310,8 +315,15 @@ function Start-StateAware {
     $argList += @('--config-base64', $invocation.ConfigBase64)
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = $WxcExec
-    foreach ($a in $argList) { $psi.ArgumentList.Add($a) }
+    if ($StdinFile) {
+        $psi.FileName = $env:ComSpec
+        $quoted = ($argList | ForEach-Object { "`"$_`"" }) -join ' '
+        $psi.Arguments = "/d /s /c `"`"$WxcExec`" $quoted < `"$StdinFile`"`""
+    } else {
+        $psi.FileName = $WxcExec
+        foreach ($a in $argList) { $psi.ArgumentList.Add($a) }
+        $psi.RedirectStandardInput = [bool]$WriteStdin
+    }
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
@@ -325,56 +337,14 @@ function Start-StateAware {
     # caller is off starting another phase.
     @{
         Process    = $proc
+        Stdin      = if ($WriteStdin) { $proc.StandardInput.BaseStream } else { $null }
         StdoutTask = $proc.StandardOutput.ReadToEndAsync()
         StderrTask = $proc.StandardError.ReadToEndAsync()
         StartedAt  = [DateTime]::UtcNow
     }
 }
 
-# Start an exec whose stdin the caller controls. Without -StdinFile the handle's
-# Stdin is a writable stream the caller writes and closes; with it, cmd.exe
-# redirects the file (or NUL) onto stdin, as `wxc-exec ... < file` would.
-# Complete it with Wait-StateAware.
-function Start-StateAwareWithStdin {
-    param(
-        [hashtable]$Request,
-        [string]$StdinFile
-    )
-
-    $invocation = ConvertTo-StateAwareInvocation -Request $Request
-    $argList = @('--operation', $invocation.Operation, $invocation.TargetFlag, $invocation.TargetId)
-    if ($Debug) { $argList += '--debug' }
-    $argList += @('--config-base64', $invocation.ConfigBase64)
-
-    $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    if ($StdinFile) {
-        $psi.FileName = $env:ComSpec
-        $quoted = ($argList | ForEach-Object { "`"$_`"" }) -join ' '
-        $psi.Arguments = "/d /s /c `"`"$WxcExec`" $quoted < `"$StdinFile`"`""
-    } else {
-        $psi.FileName = $WxcExec
-        foreach ($a in $argList) { $psi.ArgumentList.Add($a) }
-        $psi.RedirectStandardInput = $true
-    }
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.CreateNoWindow = $true
-
-    $proc = [System.Diagnostics.Process]::new()
-    $proc.StartInfo = $psi
-    $null = $proc.Start()
-
-    @{
-        Process    = $proc
-        Stdin      = if ($StdinFile) { $null } else { $proc.StandardInput.BaseStream }
-        StdoutTask = $proc.StandardOutput.ReadToEndAsync()
-        StderrTask = $proc.StandardError.ReadToEndAsync()
-        StartedAt  = [DateTime]::UtcNow
-    }
-}
-
-# Close a Start-StateAwareWithStdin handle's stdin, tolerating a pipe the
+# Close a Start-StateAware -WriteStdin handle's stdin, tolerating a pipe the
 # executor already closed by exiting.
 function Close-StateAwareStdin {
     param([hashtable]$Handle)
@@ -2057,7 +2027,7 @@ try {
     if ($inReady) {
         Run-StateAwareTest "S: piped host stdin reaches the command" {
             $req = @{ phase = 'exec'; sandboxId = $script:inSandbox; process = @{ commandLine = 'cat'; timeout = 60000 } }
-            $h = Start-StateAwareWithStdin -Request $req
+            $h = Start-StateAware -Request $req -WriteStdin
             $payload = [System.Text.Encoding]::UTF8.GetBytes("PIPED-STDIN-LINE`n")
             $h.Stdin.Write($payload, 0, $payload.Length)
             Close-StateAwareStdin $h
@@ -2070,7 +2040,7 @@ try {
             $file = Join-Path $script:inTestRoot 'input.txt'
             [System.IO.File]::WriteAllText($file, "FILE-STDIN-LINE-1`nFILE-STDIN-LINE-2`n")
             $req = @{ phase = 'exec'; sandboxId = $script:inSandbox; process = @{ commandLine = 'wc -l'; timeout = 60000 } }
-            $r = Wait-StateAware (Start-StateAwareWithStdin -Request $req -StdinFile $file)
+            $r = Wait-StateAware (Start-StateAware -Request $req -StdinFile $file)
             Assert-True ($r.ExitCode -eq 0) "wc exits 0 (stderr: $($r.Stderr.Trim()))"
             Assert-True ($r.Stdout.Trim() -eq '2') "wc counted the file's two lines (got '$($r.Stdout.Trim())')"
         } | Out-Null
@@ -2081,7 +2051,7 @@ try {
             $expected = ([System.Security.Cryptography.SHA256]::HashData($bytes) |
                 ForEach-Object { $_.ToString('x2') }) -join ''
             $req = @{ phase = 'exec'; sandboxId = $script:inSandbox; process = @{ commandLine = 'sha256sum'; timeout = 60000 } }
-            $h = Start-StateAwareWithStdin -Request $req
+            $h = Start-StateAware -Request $req -WriteStdin
             $h.Stdin.Write($bytes, 0, $bytes.Length)
             Close-StateAwareStdin $h
             $r = Wait-StateAware $h
@@ -2092,7 +2062,7 @@ try {
 
         Run-StateAwareTest "S: the command sees end-of-file only once host stdin closes" {
             $req = @{ phase = 'exec'; sandboxId = $script:inSandbox; process = @{ commandLine = "sh -c 'cat; echo CAT-SAW-EOF'"; timeout = 60000 } }
-            $h = Start-StateAwareWithStdin -Request $req
+            $h = Start-StateAware -Request $req -WriteStdin
             $payload = [System.Text.Encoding]::UTF8.GetBytes("BEFORE-EOF`n")
             $h.Stdin.Write($payload, 0, $payload.Length)
             $h.Stdin.Flush()
@@ -2107,14 +2077,14 @@ try {
 
         Run-StateAwareTest "S: an empty stdin ends the command cleanly" {
             $req = @{ phase = 'exec'; sandboxId = $script:inSandbox; process = @{ commandLine = 'wc -c'; timeout = 60000 } }
-            $r = Wait-StateAware (Start-StateAwareWithStdin -Request $req -StdinFile 'NUL')
+            $r = Wait-StateAware (Start-StateAware -Request $req -StdinFile 'NUL')
             Assert-True ($r.ExitCode -eq 0) "wc exits 0 (stderr: $($r.Stderr.Trim()))"
             Assert-True ($r.Stdout.Trim() -eq '0') "wc read no bytes (got '$($r.Stdout.Trim())')"
         } | Out-Null
 
         Run-StateAwareTest "S: a host stdin that never closes does not hold up a command that ignores it" {
             $req = @{ phase = 'exec'; sandboxId = $script:inSandbox; process = @{ commandLine = 'echo IGNORES-STDIN'; timeout = 60000 } }
-            $h = Start-StateAwareWithStdin -Request $req
+            $h = Start-StateAware -Request $req -WriteStdin
             $exited = $h.Process.WaitForExit(60000)
             Assert-True $exited "the executor exited while its stdin was still open"
             if (-not $exited) { try { $h.Process.Kill() } catch { } }
@@ -2126,7 +2096,7 @@ try {
 
         Run-StateAwareTest "S: a reader waiting on a stdin that never closes still times out" {
             $req = @{ phase = 'exec'; sandboxId = $script:inSandbox; process = @{ commandLine = 'cat'; timeout = 3000 } }
-            $h = Start-StateAwareWithStdin -Request $req
+            $h = Start-StateAware -Request $req -WriteStdin
             $exited = $h.Process.WaitForExit(60000)
             Assert-True $exited "the executor exited after the timeout"
             if (-not $exited) { try { $h.Process.Kill() } catch { } }
@@ -2140,7 +2110,7 @@ try {
     if ($inReady -and $inPeerReady) {
         Run-StateAwareTest "S: a stdin flood into a command that ignores it starves nothing" {
             $flooded = @{ phase = 'exec'; sandboxId = $script:inSandbox; process = @{ commandLine = "sh -c 'sleep 8; echo FLOODED-DONE'"; timeout = 60000 } }
-            $h = Start-StateAwareWithStdin -Request $flooded
+            $h = Start-StateAware -Request $flooded -WriteStdin
             $flood = [byte[]]::new(32 * 1024 * 1024)
             $writeTask = $h.Stdin.WriteAsync($flood, 0, $flood.Length)
             Start-Sleep -Seconds 2

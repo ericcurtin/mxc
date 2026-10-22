@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `MxcLifecycle.RunInContainer` and `RunInContainerAsync` close the command's
   stdin before waiting, so a command that reads stdin sees end-of-file instead
   of waiting for input that cannot arrive.
+- `MxcProcess.Wait`, `WaitAsync`, and `WaitForExitWithOutputAsync` close
+  `StandardInput` if it was never taken, as Rust and Node already do, so a
+  command that reads stdin finishes instead of waiting until it times out.
+  `StandardInput` then returns `null`.
 - The managed V1 facade uses `MxcContainer` with `ContainerRequest` for
   complete requests, and `MxcLifecycle` with typed `ProvisionRequest`,
   `LifecycleContainmentKind`, `ContainerId`, and `ExecutionRequest` for

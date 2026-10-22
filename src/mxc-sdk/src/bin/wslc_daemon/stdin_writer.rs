@@ -7,7 +7,7 @@
 use std::fs::File;
 use std::io::{ErrorKind, Write};
 use std::os::windows::io::AsRawHandle;
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
@@ -30,6 +30,7 @@ pub enum StdinEnd {
 struct Shared {
     stdin: File,
     gate: Mutex<Gate>,
+    write_done: Condvar,
 }
 
 /// Lets [`StdinStop::stop`] tell whether a write is in progress, since
@@ -62,6 +63,7 @@ pub fn stdin_writer(stdin: File, wake: mpsc::WeakSender<Vec<u8>>) -> (StdinWrite
     let shared = Arc::new(Shared {
         stdin,
         gate: Mutex::new(Gate::default()),
+        write_done: Condvar::new(),
     });
     let stop = StdinStop {
         shared: Arc::downgrade(&shared),
@@ -105,6 +107,7 @@ impl StdinWriter {
             let stopped = {
                 let mut gate = shared.gate();
                 gate.writing = false;
+                shared.write_done.notify_all();
                 gate.stopped
             };
             if stopped {
@@ -138,13 +141,29 @@ impl StdinStop {
 
         let handle = HANDLE(shared.stdin.as_raw_handle());
         let deadline = Instant::now() + STOP_WRITE_WAIT;
-        while shared.gate().writing && Instant::now() < deadline {
+        let mut gate = shared.gate();
+        while gate.writing {
+            let now = Instant::now();
+            if now >= deadline {
+                eprintln!(
+                    "[wslc-daemon] an exec's stdin write ignored cancellation for \
+                     {STOP_WRITE_WAIT:?}; its writer thread is left to finish on its own"
+                );
+                return;
+            }
             // SAFETY: `shared` keeps the handle open for this call; cancelling
             // another thread's synchronous write on it is supported.
             unsafe {
                 let _ = CancelIoEx(handle, None);
             }
-            std::thread::sleep(Duration::from_millis(1));
+
+            // A cancellation issued before the write reaches the kernel finds
+            // nothing to cancel, so it is repeated until the write returns.
+            gate = shared
+                .write_done
+                .wait_timeout(gate, CANCEL_RETRY_INTERVAL.min(deadline - now))
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
         }
     }
 }
@@ -152,6 +171,8 @@ impl StdinStop {
 /// How long [`StdinStop::stop`] keeps cancelling a write that has not
 /// returned, so a handle that ignores cancellation cannot hold up the exec.
 const STOP_WRITE_WAIT: Duration = Duration::from_secs(5);
+
+const CANCEL_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 fn is_reader_gone(error: &std::io::Error) -> bool {
     matches!(

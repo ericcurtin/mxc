@@ -128,4 +128,21 @@ public class MxcLifecycleWslcE2ETests
         Assert.Equal("IGNORES-STDIN", stdout.Trim());
         stdin.Dispose();
     }
+
+    [Fact]
+    public async Task SpawnInContainer_WaitClosesAnUntakenStdin()
+    {
+        RequireWslc();
+        using var container = new StartedContainer();
+
+        using var proc = MxcLifecycle.SpawnInContainer(
+            container.Id,
+            new ExecutionRequest("sh -c 'cat; echo WAIT-SAW-EOF'") { TimeoutMs = 60_000 });
+        var (result, stdout, _) =
+            await proc.WaitForExitWithOutputAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(result.TimedOut, "waiting must close a stdin the caller never took");
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal("WAIT-SAW-EOF", Encoding.UTF8.GetString(stdout).Trim());
+    }
 }

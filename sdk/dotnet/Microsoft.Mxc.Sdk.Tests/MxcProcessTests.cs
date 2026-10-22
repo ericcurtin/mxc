@@ -293,6 +293,26 @@ public class MxcProcessTests
         @"C:\Windows\System32\cmd.exe /v:on /c set /p x= & echo BLOCKER_DONE";
 
     [Fact]
+    public async Task Wait_ClosesAnUntakenStdin_SoAChildReadingItFinishes()
+    {
+        Assert.SkipUnless(HostCanSpawn, "no host backend available");
+        using var proc = MxcContainer.Spawn(new ContainerRequest(BlockerCommand));
+
+        var waitTask = proc.WaitAsync(TestContext.Current.CancellationToken);
+        var finished = await Task.WhenAny(
+            waitTask,
+            Task.Delay(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+        if (finished != waitTask)
+        {
+            proc.Kill();
+        }
+
+        Assert.Same(waitTask, finished);
+        Assert.Equal(0, (await waitTask).ExitCode);
+        Assert.Null(proc.StandardInput);
+    }
+
+    [Fact]
     public void Kill_TerminatesRunningChild()
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");

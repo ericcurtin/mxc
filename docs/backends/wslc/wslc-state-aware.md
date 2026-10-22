@@ -511,10 +511,9 @@ An exec reads the stdin its caller supplies:
 
 - **SDK streaming exec** (`spawn_in_container` in Rust, `SpawnInContainer` in
   .NET, `spawnInContainer` in Node). The returned process exposes a writable
-  stdin, and closing it gives the process end-of-file. Rust's `wait` and
-  Node's `wait()` also close a stdin the caller did not take; in .NET, dispose
-  `StandardInput` or the process. The run-to-completion helpers close stdin
-  before they wait, so a command that reads stdin sees end-of-file.
+  stdin, and closing it gives the process end-of-file. Waiting on the process
+  also closes a stdin the caller did not take. The run-to-completion helpers
+  close stdin before they wait, so a command that reads stdin sees end-of-file.
 
 Input is streamed rather than collected first, so a caller whose stdin never
 closes does not delay the start of the exec, and a command that never reads
@@ -537,11 +536,17 @@ a command that may not read it small.
 
 Stdin travels on a second connection to the daemon (an `exec_stdin` request
 naming the exec and its run token), because the exec connection is busy
-carrying output. The daemon accepts one such connection per exec, only for an
-exec that asked for stdin and only while its run lasts, and ends it when the
-run is over. If that connection cannot be made, the exec is cancelled rather
-than left waiting for input that will never come, and the caller gets an error
-saying stdin could not be forwarded.
+carrying output. The client opens it only once it has input or end-of-file to
+send, so a caller whose stdin stays open and silent holds no connection. The
+daemon accepts one such connection per exec, only for an exec that asked for
+stdin and only while its run lasts, and ends it when the run is over. Input
+that arrives after the run is over is dropped. If that connection cannot be
+made, or ends before the client
+sends end-of-file (a dropped connection, a failed read of the input, or a
+malformed frame), the exec is cancelled. Its stdin stays open until the
+cancellation lands, so the process never sees a truncated input as complete,
+and the caller gets an error saying stdin could not be forwarded. A caller that
+kills the exec itself gets the ordinary killed result instead.
 
 The create-and-run (one-shot) WSLc path does not forward stdin; its process
 reads end-of-file at once.
@@ -568,16 +573,16 @@ Three conditions surface as `busy`, and all reach an SDK caller as
 | --- | --- | --- |
 | The daemon's eight exec slots are all occupied | `WSLc daemon exec capacity is exhausted` | Succeeds once any exec finishes |
 | The named container already has an exec in flight | `sandbox <id> already has an exec in flight` | Succeeds once that container's run finishes |
-| Every client slot is occupied and the request is not a cancellation | `WSLc daemon client capacity is exhausted` | Succeeds once any client disconnects |
+| Every client slot is occupied and the request is neither a cancellation nor an exec's stdin | `WSLc daemon client capacity is exhausted` | Succeeds once any client disconnects |
 
-Up to sixteen additional control connections can be serviced while every exec
-slot is occupied: eight leave room for each exec's stdin connection, and eight
-for lifecycle work. Beyond that, a connection is admitted only to cancel: cancellation
-is the one request that never waits on the worker, and the only way to end a run
-with no timeout, so it keeps capacity of its own that lifecycle work cannot
-consume. A connection on that lane must send its request within two seconds and
-in under 1 KB, so one that connects and stalls cannot hold a cancellation slot
-for the general deadline.
+Up to eight additional control connections can be serviced while every exec slot
+is occupied. Beyond that, a connection is admitted only to cancel an exec or to
+carry its stdin, with room for one of each per exec. Neither request waits on
+the worker: cancellation is the only way to end a run with no timeout, and an
+exec whose stdin connection is refused is cancelled, so they keep capacity of
+their own that lifecycle work cannot consume. A connection on that lane must send
+its request within two seconds and in under 1 KB, so one that connects and
+stalls cannot hold a slot for the general deadline.
 
 `start` / `stop` / `deprovision` naming a container with an exec in flight
 **wait** for that run, because deleting the container would free a handle the

@@ -83,7 +83,9 @@ public interface IMxcProcess : IDisposable
 /// <para>
 /// <b>Draining.</b> Like the underlying Rust process handle, <see cref="Wait"/>
 /// drains any standard stream you did <i>not</i> take, so a caller that ignores
-/// the child's output cannot deadlock on a full pipe. If you <i>do</i> take
+/// the child's output cannot deadlock on a full pipe, and closes
+/// <see cref="StandardInput"/> if you did not take it, so a child reading stdin
+/// sees EOF. If you <i>do</i> take
 /// <see cref="StandardOutput"/> / <see cref="StandardError"/>, read them (e.g.
 /// on background tasks or via <see cref="WaitForExitWithOutputAsync"/>) so the
 /// child does not block on a full pipe while you wait.
@@ -181,7 +183,8 @@ public class MxcProcess : IMxcProcess
     /// The child's stdin as a writable <see cref="Stream"/>. Returns the same
     /// stream on repeated access; <see cref="Stream.Dispose()"/> (or disposing
     /// this process) closes stdin, sending EOF to the child. Returns
-    /// <see langword="null"/> if stdin was not piped.
+    /// <see langword="null"/> if stdin was not piped, or if a wait closed it
+    /// before it was taken.
     /// </summary>
     public Stream? StandardInput
     {
@@ -394,7 +397,8 @@ public class MxcProcess : IMxcProcess
     /// Block until the child exits (honouring
     /// <see cref="V1.ContainerRequest.TimeoutMs"/> or
     /// <see cref="ExecutionRequest.TimeoutMs"/>), draining any standard
-    /// stream you did not take so the child cannot block on a full pipe.
+    /// stream you did not take so the child cannot block on a full pipe, and
+    /// closing stdin if you did not take it.
     /// </summary>
     /// <returns>The exit code, or a timed-out result.</returns>
     /// <exception cref="MxcException">A wait error occurred.</exception>
@@ -706,8 +710,26 @@ public class MxcProcess : IMxcProcess
         lock (_controlLock)
         {
             ThrowIfDisposed();
+            CloseStdinIfUntaken();
             DrainIfUntaken(ref _stdoutState, ref _stdout, stdout: true);
             DrainIfUntaken(ref _stderrState, ref _stderr, stdout: false);
+        }
+    }
+
+    private void CloseStdinIfUntaken()
+    {
+        if (_stdinTaken)
+        {
+            return;
+        }
+        _stdinTaken = true;
+        unsafe
+        {
+            var s = NativeMethods.mxc_sandbox_take_stdin(_handle.Ptr);
+            if (s is not null)
+            {
+                MxcWriteStreamHandle.FromRaw(s).Dispose();
+            }
         }
     }
 

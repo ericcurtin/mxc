@@ -183,7 +183,8 @@ public static class MxcLifecycle
 
     /// <summary>
     /// Run a command in a started container and return live stdio streams.
-    /// IsolationSession and WSLC support this streaming form. Windows Sandbox
+    /// IsolationSession and WSLC support this streaming form, including
+    /// <see cref="MxcProcess.StandardInput"/>. Windows Sandbox
     /// lifecycle requests are available only through raw exact 1.1.0-alpha
     /// requests.
     /// </summary>
