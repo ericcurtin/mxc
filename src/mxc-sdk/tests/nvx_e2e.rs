@@ -3,6 +3,10 @@
 
 use mxc_sdk::v1::ErrorCode;
 
+#[cfg(all(windows, target_arch = "x86_64", feature = "microvm"))]
+#[path = "nvx_e2e/network.rs"]
+mod windows_network;
+
 fn process_only_request(command: &str) -> serde_json::Value {
     serde_json::json!({
         "version": "1.1.0-alpha",
@@ -401,7 +405,7 @@ mod windows_x64 {
         )
     }
 
-    fn assert_no_run_state(pid: u32) {
+    pub(super) fn assert_no_run_state(pid: u32) {
         let prefix = format!("mxc-nvx-{pid}-");
         let retained: Vec<_> = std::fs::read_dir(std::env::temp_dir())
             .expect("temporary directory listing")
@@ -500,81 +504,6 @@ print("NVX_TYPED_IMAGE_AND_POLICY_OK", end="")
         assert_eq!(std::fs::read(rw.join("result")).unwrap(), b"write-ok");
         assert_no_run_state(std::process::id());
         println!("VM_EXECUTED typed selected-image filesystem read/write/deny and cleanup");
-    }
-
-    #[test]
-    #[ignore = "VM: requires Windows x64, WHP and the exact signed official bundle"]
-    fn signed_bundle_deny_default_proxy_policy() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-        use std::time::Duration;
-
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        listener.set_nonblocking(true).unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
-        let server_stop = stop.clone();
-        let server = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
-            while !server_stop.load(Ordering::Acquire) {
-                let mut stream = match listener.accept() {
-                    Ok((stream, _)) => stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(10));
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
-                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-                stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-                let mut request = Vec::new();
-                let mut byte = [0];
-                while !request.ends_with(b"\r\n\r\n") && request.len() < 8192 {
-                    stream.read_exact(&mut byte)?;
-                    request.push(byte[0]);
-                }
-                if !request.ends_with(b"\r\n\r\n") {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "proxy request headers exceed 8192 bytes",
-                    ));
-                }
-                stream.write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nNVX_PROXY_OK",
-                )?;
-                return Ok(request);
-            }
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "workload did not reach the host proxy",
-            ))
-        });
-        let mut request = process_only_request(
-            r#"python3 -c 'import urllib.request; data = urllib.request.urlopen("http://mxc-policy.invalid/probe", timeout=10).read(); assert data == b"NVX_PROXY_OK", data; print(data.decode(), end="")'"#,
-        );
-        request["microvm"]["image"] = json!("python:3.12-alpine");
-        request["network"] = json!({
-            "egress": {"default": "deny"},
-            "ingress": {"default": "deny", "hostLoopback": "deny"}
-        });
-        request["runtimeConfig"] = json!({
-            "networkProxy": format!("http://127.0.0.1:{port}")
-        });
-        let result = mxc_sdk::__ffi::run_json(&request.to_string(), true);
-        stop.store(true, Ordering::Release);
-        let received = server.join().expect("host proxy thread");
-        let result = result.expect("proxy-only guest execution");
-        let received = received.expect("request must reach the host proxy");
-        assert!(
-            received.starts_with(b"GET http://mxc-policy.invalid/probe HTTP/1.1\r\n"),
-            "{}",
-            String::from_utf8_lossy(&received)
-        );
-        assert_eq!(result.outcome, WaitResult::Exited(0), "{result:?}");
-        assert_eq!(result.stdout, b"NVX_PROXY_OK");
-        assert_no_run_state(std::process::id());
-        println!("VM_EXECUTED deny-default proxy connectivity and cleanup");
     }
 
     #[test]
