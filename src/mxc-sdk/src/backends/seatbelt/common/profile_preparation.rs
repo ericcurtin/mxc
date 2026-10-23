@@ -87,16 +87,10 @@ pub(crate) fn resolve_policy_path(path: &str) -> Result<String, ProfileError> {
 
 /// Errors a different path would avoid blame the request; anything else is a host fault.
 pub(crate) fn classify_io_error(message: String, error: &std::io::Error) -> ProfileError {
-    use std::io::ErrorKind;
-
-    let is_loop = error.raw_os_error() == Some(libc::ELOOP);
-    match error.kind() {
-        ErrorKind::NotFound
-        | ErrorKind::NotADirectory
-        | ErrorKind::PermissionDenied
-        | ErrorKind::InvalidFilename => ProfileError::Policy(message),
-        _ if is_loop => ProfileError::Policy(message),
-        _ => ProfileError::Host(message),
+    if crate::mxc_common::filesystem_symlink::is_policy_path_error(error) {
+        ProfileError::Policy(message)
+    } else {
+        ProfileError::Host(message)
     }
 }
 
@@ -244,20 +238,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn only_path_problems_blame_the_request() {
-        let eio = std::io::Error::from_raw_os_error(libc::EIO);
-        let eacces = std::io::Error::from_raw_os_error(libc::EACCES);
-        assert!(matches!(
-            classify_io_error(String::new(), &eio),
-            ProfileError::Host(_)
-        ));
-        assert!(matches!(
-            classify_io_error(String::new(), &eacces),
-            ProfileError::Policy(_)
-        ));
     }
 
     #[test]

@@ -22,7 +22,8 @@ use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::mxc_common::filesystem_symlink::resolve_through_symlinks;
+use crate::mxc_common::filesystem_object::FilesystemPolicyError;
+use crate::mxc_common::filesystem_symlink::{is_policy_path_error, resolve_through_symlinks};
 use crate::mxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
@@ -135,10 +136,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // and classify each as a file/dir mask (see [`resolve_denied_paths`]).
         // Only clones the request when a path needs rewriting (common case:
         // none). See docs/backends/bwrap/bubblewrap-backend.md.
-        let plan = match resolve_denied_paths(&request.policy, logger) {
-            Ok(plan) => plan,
-            Err(msg) => return Err(ScriptResponse::rejected(&msg)),
-        };
+        let plan = resolve_denied_paths(&request.policy, logger).map_err(|e| e.into_response())?;
         let resolved;
         let request = match plan.paths {
             Some(denied_paths) => {
@@ -1191,23 +1189,28 @@ struct DeniedPlan {
 fn resolve_denied_paths(
     policy: &crate::mxc_common::models::ContainerPolicy,
     logger: &mut Logger,
-) -> Result<DeniedPlan, String> {
+) -> Result<DeniedPlan, FilesystemPolicyError> {
     let mut changed = false;
     let mut out = Vec::with_capacity(policy.denied_paths.len());
     let mut files = HashSet::new();
     for p in &policy.denied_paths {
         if let Some(resolved) = resolve_through_symlinks(Path::new(p)) {
             if let Some(error) = resolved.error {
-                return Err(format!(
+                let message = format!(
                     "Bubblewrap: deniedPaths entry '{p}' could not be resolved ({error}); \
                      refusing to start."
-                ));
+                );
+                return Err(if is_policy_path_error(&error) {
+                    FilesystemPolicyError::Policy(message)
+                } else {
+                    FilesystemPolicyError::Host(message)
+                });
             }
             let resolved = resolved.path.to_str().ok_or_else(|| {
-                format!(
+                FilesystemPolicyError::Policy(format!(
                     "Bubblewrap: deniedPaths entry '{p}' resolves to a non-UTF-8 host path that \
                      cannot be safely masked; refusing to start."
-                )
+                ))
             })?;
             if resolved != p.as_str() {
                 let _ = writeln!(
@@ -2431,7 +2434,10 @@ mod tests {
             let error = resolve_denied_paths(&policy, &mut logger)
                 .err()
                 .unwrap_or_else(|| panic!("{} must fail closed", denied.display()));
-            assert!(error.contains("could not be resolved"), "{error}");
+            assert!(
+                matches!(&error, FilesystemPolicyError::Policy(m) if m.contains("could not be resolved")),
+                "{error:?}"
+            );
         }
     }
 

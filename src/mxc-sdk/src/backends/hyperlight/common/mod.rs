@@ -498,6 +498,7 @@ impl HyperlightScriptRunner {
                              unenforced deny."
                         )));
                     }
+                    #[cfg(target_os = "windows")]
                     PathRelationship::Ambiguous => {
                         return Err(RunnerError::Policy(format!(
                             "Hyperlight: cannot verify deniedPaths against allow lists because \
@@ -1345,6 +1346,7 @@ enum PathRelationship {
     Overlaps,
     Separate,
     /// The path spelling cannot be compared safely.
+    #[cfg(target_os = "windows")]
     Ambiguous,
     /// The host could not resolve a path.
     Unresolvable(String),
