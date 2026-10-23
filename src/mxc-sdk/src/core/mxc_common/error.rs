@@ -28,9 +28,6 @@ pub enum WxcError {
     #[error("Filesystem policy error: {0}")]
     FilesystemPolicy(String),
 
-    #[error("Filesystem policy error: bfscfg.exe is not available on this host")]
-    BfsNotAvailable,
-
     #[error("Initialization error: {0}")]
     Initialization(String),
 
@@ -63,13 +60,8 @@ impl From<serde_json::Error> for WxcError {
 }
 
 impl WxcError {
-    /// The wire code this failure is reported under.
-    ///
-    /// The grouping is by *whose* problem it is, because that is what decides
-    /// what the caller can do next: fix the request, fix the host, or report a
-    /// bug. `BfsNotAvailable` is the one that is easy to get wrong -- nothing
-    /// the caller writes makes `bfscfg.exe` appear, so it is a property of the
-    /// host rather than a judgement of the policy.
+    /// The wire code this failure is reported under, grouped by who can act on
+    /// it: the request, the host, or neither.
     pub fn error_code(&self) -> MxcErrorCode {
         match self {
             WxcError::StateAware(error) => error.code,
@@ -77,7 +69,6 @@ impl WxcError {
                 MxcErrorCode::MalformedRequest
             }
             WxcError::Validation(_) => MxcErrorCode::PolicyValidation,
-            WxcError::BfsNotAvailable => MxcErrorCode::BackendUnavailable,
             WxcError::Process(_)
             | WxcError::Io(_)
             | WxcError::Firewall(_)
@@ -105,45 +96,33 @@ impl From<std::io::Error> for WxcError {
 }
 
 #[cfg(target_os = "windows")]
-pub const DENIED_PATHS_NOT_SUPPORTED_MSG: &str =
-    "filesystem.deniedPaths is not supported by this AppContainer filesystem mode. \
-     Paths are denied by default unless granted via readwritePaths or readonlyPaths. \
-     Remove deniedPaths, or narrow readwritePaths/readonlyPaths to exclude the path \
-     you wanted to deny.";
-
-#[cfg(target_os = "windows")]
 pub const DENIED_PATHS_FEATURE_DISABLED_MSG: &str =
     "filesystem.deniedPaths cannot be enforced by the BaseContainer backend on this \
      OS build: it does not advertise PSE_SUPPORT_FS_DENY through \
      QueryProcessSecurityEnvironmentSupport. Run on a build with \
-     BaseContainer deny support, or use the ProcessContainer dispatcher so it can select \
-     the AppContainer + DACL fallback (which enforces deniedPaths via DENY ACEs).";
+     BaseContainer deny support or remove filesystem.deniedPaths.";
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn a_missing_host_tool_is_not_reported_as_a_bad_policy() {
-        assert_eq!(
-            WxcError::BfsNotAvailable.error_code(),
-            MxcErrorCode::BackendUnavailable
-        );
+    fn a_refused_policy_is_told_apart_from_a_host_fault() {
         assert_eq!(
             WxcError::Validation("denied".into()).error_code(),
             MxcErrorCode::PolicyValidation
         );
-    }
-
-    #[test]
-    fn an_unreadable_request_is_told_apart_from_a_refused_one() {
-        assert_eq!(
-            WxcError::ConfigParse("bad json".into()).error_code(),
-            MxcErrorCode::MalformedRequest
-        );
         assert_eq!(
             WxcError::Io("disk gone".into()).error_code(),
             MxcErrorCode::BackendError
+        );
+    }
+
+    #[test]
+    fn an_unreadable_request_is_malformed() {
+        assert_eq!(
+            WxcError::ConfigParse("bad json".into()).error_code(),
+            MxcErrorCode::MalformedRequest
         );
     }
 
