@@ -3235,14 +3235,8 @@ mod tests {
     /// worth rewriting, a host that cannot run LXC at all is not.
     #[test]
     fn a_policy_this_backend_cannot_enforce_is_blamed_on_the_request() {
-        let runtime_proxy = ExecutionRequest {
-            script_code: "echo hello".to_string(),
-            policy: ContainerPolicy {
-                runtime_network_proxy_specified: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let mut runtime_proxy = runtime_proxy_request("10.0.0.1");
+        runtime_proxy.script_code = "echo hello".to_string();
 
         for (what, request) in [
             ("runtimeConfig.networkProxy", runtime_proxy),
