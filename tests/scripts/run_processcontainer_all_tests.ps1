@@ -68,8 +68,7 @@ Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot 'lib\WinProcessContainer.Common.ps1')
 
-# Area registry: key -> the script that owns it. The keys are unchanged from the
-# pre-split harness's phase names, so an existing -Phases list keeps working.
+# Area registry: key -> the script that owns it.
 $AreaScripts = [ordered]@{
     'Probes'                   = 'run_processcontainer_probes_test.ps1'
     'T3Forced'                 = 'run_processcontainer_filesystem_matrix_test.ps1'
@@ -87,7 +86,7 @@ $AreaScripts = [ordered]@{
     'NetworkCapabilityMatrix'  = 'run_processcontainer_network_capability_test.ps1'
     'NetworkModel3Equivalence' = 'run_processcontainer_network_model3_test.ps1'
     'NetworkEgressRules'       = 'run_processcontainer_network_egress_test.ps1'
-    'NetworkHostLoopback'      = 'run_processcontainer_network_loopback_test.ps1'
+    'NetworkDirectHostLoopback' = 'run_processcontainer_network_loopback_test.ps1'
     'NetworkProxy'             = 'run_processcontainer_network_proxy_test.ps1'
     'NetworkRejections'        = 'run_processcontainer_network_rejections_test.ps1'
     'PathAliasing'             = 'run_processcontainer_path_aliasing_test.ps1'
@@ -103,6 +102,9 @@ if (-not $PSHostExe) { $PSHostExe = 'powershell.exe' }
 
 # Validate the selection before anything expensive happens.
 if ($Areas.Count -gt 0) {
+    $Areas = @($Areas | ForEach-Object {
+        if ($_ -eq 'NetworkHostLoopback') { 'NetworkDirectHostLoopback' } else { $_ }
+    })
     $unknown = @($Areas | Where-Object { $_ -notin $AreaScripts.Keys })
     if ($unknown.Count -gt 0) {
         throw "Unknown -Areas value(s): $($unknown -join ', '). Valid: $($AreaScripts.Keys -join ', ')"

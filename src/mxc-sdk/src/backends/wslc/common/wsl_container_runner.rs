@@ -31,7 +31,7 @@ use crate::mxc_common::script_runner::ScriptRunner;
 use crate::mxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 use crate::mxc_common::validator::validate_network_policy_support;
 
-use crate::wslc_common::container_steps::{self, sdk_error};
+use crate::wslc_common::container_steps::{self, sdk_error, SESSION_BOOT_TIMEOUT_MS};
 use crate::wslc_common::error::WslcError;
 use crate::wslc_common::image;
 use crate::wslc_common::policy;
@@ -154,13 +154,6 @@ fn write_through(mut sink: impl std::io::Write, bytes: &[u8]) -> std::io::Result
 /// output has been flushed and no further callback can arrive. Bounded so a
 /// misbehaving runtime can't park teardown forever.
 const EXIT_CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// VM/session boot budget, in milliseconds. This is the deadline for bringing
-/// the WSL session up, and is deliberately independent of the per-command
-/// `scriptTimeout` (the command runtime deadline is enforced separately at the
-/// wait, see [`wait_timeout_ms`]). A short `scriptTimeout` must not be able to
-/// abort a cold VM boot.
-const SESSION_BOOT_TIMEOUT_MS: u32 = 180_000;
 
 /// How long to wait for an abandoned pull before giving up on its session.
 const PULL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -420,6 +413,16 @@ impl WSLContainerRunner {
     }
 }
 
+impl WSLContainerRunner {
+    fn session_sizing(&self) -> container_steps::SessionSizing {
+        container_steps::SessionSizing {
+            cpu_count: self.config.cpu_count,
+            memory_mb: self.config.memory_mb,
+            gpu: self.config.gpu,
+        }
+    }
+}
+
 impl ScriptRunner for WSLContainerRunner {
     /// Reject policies WSLc cannot enforce, before any container is created.
     /// Mirrors the config parser so requests reaching the engine directly
@@ -427,6 +430,9 @@ impl ScriptRunner for WSLContainerRunner {
     /// instead of late in `execute` on the broken in-container iptables path.
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         reject_unsupported_lifecycle(request)?;
+
+        container_steps::check_sizing_against_host(self.session_sizing())?;
+
         policy_mapping::container_working_directory(&request.working_directory)
             .map_err(|msg| WslcError::Rejected(msg).into_response())?;
         policy::reject_ui_policy(request).map_err(as_wslc_rejection)?;
@@ -492,6 +498,21 @@ fn reject_unsupported_lifecycle(request: &ExecutionRequest) -> Result<(), Script
     Ok(())
 }
 
+const GENERATED_SESSION_NAME_PREFIX: &str = "mxc-wslc-";
+
+/// Name the WSLc session a run gets, minting one when `containerId` is absent:
+/// WSLc refuses an empty name with `WSLC_E_INVALID_SESSION_NAME` (0x80040608).
+fn resolve_session_name(container_id: &str) -> String {
+    if container_id.is_empty() {
+        format!(
+            "{GENERATED_SESSION_NAME_PREFIX}{}",
+            uuid::Uuid::new_v4().simple()
+        )
+    } else {
+        container_id.to_string()
+    }
+}
+
 impl WSLContainerRunner {
     /// Configure session settings and create the session.
     /// Returns the session guard (RAII).
@@ -506,7 +527,8 @@ impl WSLContainerRunner {
         request: &ExecutionRequest,
         logger: &mut Logger,
     ) -> Result<WslcSessionGuard, ScriptResponse> {
-        let session_name: Vec<u16> = to_wide(&request.container_id);
+        let session_name_str = resolve_session_name(&request.container_id);
+        let session_name: Vec<u16> = to_wide(&session_name_str);
         let storage_path_str = self.config.storage_path.clone().unwrap_or_else(|| {
             std::env::temp_dir()
                 .join("mxc-wslc-sessions")
@@ -524,6 +546,10 @@ impl WSLContainerRunner {
         if hr != S_OK {
             return Err(sdk_error("WslcInitSessionSettings failed", hr, ""));
         }
+
+        // Repeated from `validate_runner` so a caller reaching `execute`
+        // directly cannot skip it.
+        container_steps::check_sizing_against_host(self.session_sizing())?;
 
         if let Some(cpu) = self.config.cpu_count {
             let hr = sdk.WslcSetSessionSettingsCpuCount(&mut settings, cpu);
@@ -574,7 +600,7 @@ impl WSLContainerRunner {
             let msg = err_msg.to_string_lossy();
             return Err(sdk_error("WslcCreateSession failed", hr, &msg));
         }
-        let _ = writeln!(logger, "[WSLC] Session created");
+        let _ = writeln!(logger, "[WSLC] Session created: {session_name_str}");
 
         Ok(WslcSessionGuard::from_raw(
             session,
@@ -1784,6 +1810,52 @@ mod tests {
     }
 
     #[test]
+    fn validate_runner_rejects_more_processors_than_the_host_has() {
+        let impossible = u32::from(u16::MAX);
+        let runner = WSLContainerRunner::new(&WslcConfig {
+            cpu_count: Some(impossible),
+            ..WslcConfig::default()
+        });
+        let request = ExecutionRequest {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            ..Default::default()
+        };
+
+        let refused = runner
+            .validate_runner(&request)
+            .expect_err("more processors than any host has must be refused");
+
+        assert_eq!(
+            refused.failure_phase,
+            crate::mxc_common::models::FailurePhase::Rejected
+        );
+        assert!(
+            refused.error_message.contains("cpu_count"),
+            "the refusal must name the processor count: {}",
+            refused.error_message
+        );
+    }
+
+    /// `memory_mb` is a ceiling the host backs on demand, not a reservation.
+    #[test]
+    fn validate_runner_accepts_memory_past_what_the_host_has_installed() {
+        let runner = WSLContainerRunner::new(&WslcConfig {
+            memory_mb: Some(1024 * 1024),
+            ..WslcConfig::default()
+        });
+        let request = ExecutionRequest {
+            containment: crate::mxc_common::models::ContainmentBackend::Wslc,
+            ..Default::default()
+        };
+
+        assert!(
+            runner.validate_runner(&request).is_ok(),
+            "a 1 TB ceiling is not a 1 TB reservation; refusing it would refuse \
+             a configuration that demonstrably runs"
+        );
+    }
+
+    #[test]
     fn validate_runner_accepts_bare_defaults() {
         // Both supported all-or-nothing postures are enforceable.
         for action in [
@@ -2269,5 +2341,30 @@ mod tests {
         let message = sdk_init::prerequisite_error(WslcComponentFlags(0x8000));
 
         assert!(message.contains("ensure WSL2 and the WSLC SDK are installed"));
+    }
+
+    #[test]
+    fn session_name_is_the_container_id_when_the_request_names_one() {
+        assert_eq!(resolve_session_name("pitest"), "pitest");
+        assert_eq!(resolve_session_name("wslc-hello-world"), "wslc-hello-world");
+    }
+
+    #[test]
+    fn absent_container_id_mints_a_session_name() {
+        let name = resolve_session_name("");
+
+        assert!(
+            name.starts_with(GENERATED_SESSION_NAME_PREFIX),
+            "expected a minted name, got: {name}"
+        );
+        assert!(
+            name.len() > GENERATED_SESSION_NAME_PREFIX.len(),
+            "an empty name is what WSLc refuses with WSLC_E_INVALID_SESSION_NAME, got: {name}"
+        );
+    }
+
+    #[test]
+    fn minted_session_names_do_not_repeat() {
+        assert_ne!(resolve_session_name(""), resolve_session_name(""));
     }
 }

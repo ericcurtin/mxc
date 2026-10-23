@@ -63,10 +63,13 @@ tests\scripts\run_processcontainer_network_proxy_test.ps1 -RequireTier base-cont
 
 When the host probe reports `baseContainerSupportsIdentitylessLoopbackProxy`,
 the proxy area requires workload launch and a successful proxied fetch on both
-PSEC 1.0-only hosts and hosts with PSEC 1.1 ingress support.
+PSEC 1.0-only hosts and PSEC 1.1 hosts, including those without ingress support.
 A clean policy rejection is a failure on these hosts.
 Older binaries that omit this probe fact do not enable the capability-specific
 assertions; the existing proxy assertions still apply.
+
+The loopback area checks direct access with both ingress defaults. The proxy
+area checks that other IPv4 and IPv6 loopback endpoints remain blocked.
 
 Shared helpers live in `tests/scripts/lib/WinProcessContainer.Common.ps1`. It
 must be **dot-sourced, not imported as a module** — `Initialize-WpcContext`
@@ -94,6 +97,11 @@ one raises MXC-FATAL and stops the whole suite (child exit code 78).
 
 Individual `run_bwrap_*.sh`, `run_lxc_*.sh`, and `run_seatbelt_*.sh` scripts
 run focused backend suites.
+
+`run_lxc_rootless_no_network_test.sh` checks that `lxc-exec` runs a config
+with no network section without root.  Neither `run_lxc_all_tests.sh` nor CI
+runs it, because it adds a temporary user account to the machine.  Run it
+manually with `sudo bash tests/scripts/run_lxc_rootless_no_network_test.sh`.
 
 ### Manual smoke tests
 

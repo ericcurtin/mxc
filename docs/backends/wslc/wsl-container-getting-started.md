@@ -352,6 +352,15 @@ WSLC-specific settings go under `wslc` in the JSON config:
 | `imageTarPath` | string | — | Path to a local tar file to import as the image |
 | `portMappings` | array | `[]` | Host→container TCP forwards; each entry takes `windowsPort` and `containerPort` |
 
+### `containerId` names the WSL session
+
+A create-and-run request names its WSL session after the top-level
+`containerId`. The field is optional: omit it and the run gets a generated
+name of the form `mxc-wslc-<uuid>`, fresh on every run.
+
+Supply your own only when you need a name you can recognise — two runs sharing
+one `containerId` are not isolated from each other by the id alone.
+
 ### Port mappings
 
 ```json
@@ -386,8 +395,10 @@ The separate `provision` operation takes the same list under
 
 The lifecycle daemon creates one container per sandbox, so a forward belongs
 to the sandbox that declared it. The session-wide `cpuCount` / `memoryMb` /
-`gpu` settings remain available only for create-and-run execution, because that daemon shares a
-single WSL session across every sandbox. `storagePath` is create-and-run-only
+`gpu` settings remain available only for create-and-run execution, because every
+lifecycle `provision` currently joins one shared session. The daemon itself holds
+several independently sized sessions; what no caller can yet do is ask for one.
+`storagePath` is create-and-run-only
 for a different reason: the daemon leases its store from a slot pool rather
 than taking a caller-named path, so warming its cache is a separate step. See
 [the lifecycle guide](wslc-state-aware.md#image-store).
