@@ -703,23 +703,21 @@ classification drives both the wire code and the process exit code:
 | The host — no request change helps | `BackendUnavailable` | `backend_unavailable` | `-1` |
 | The runtime, during an accepted run | all other phases | `backend_error` | `-1` |
 
-A backend this build did not compile in reports `backend_unavailable`, since
-only a rebuilt executor can serve it. On the create-and-run path, a backend
-belonging to another operating system reports `unsupported_containment`, since
-naming a supported backend succeeds; the container lifecycle operations report
-such a backend as `backend_unavailable`. Within a backend, a field the host
-cannot enforce (for example ProcessContainer `filesystem.enumeratePaths`,
-`filesystem.deniedPaths`, or LPAC) is a `policy_validation` rejection naming
-that field, never a silent drop; but a missing host capability the policy
-never reached (for example no native PSEC, or no denial-capture provider) is
-`backend_unavailable`. A path the invoking user cannot access is a
-`policy_validation` rejection, but a host fault while checking a policy path
-(an I/O error or a path that cannot be resolved) is `backend_error`; either
-way the run does not start. An experimental backend named without the experimental opt-in is also
-`backend_unavailable`: the opt-in is an executor invocation mode rather than a
-policy field, so no change to the authored request reaches it. Earlier
-phase-specific codes (`malformed_request`, `unsupported_containment`,
-`unsupported_phase`, `malformed_id`) are unchanged and also exit `1`.
+Common cases:
+
+| Failure | Wire code |
+|---|---|
+| Policy field the backend cannot enforce (e.g. ProcessContainer `enumeratePaths`, `deniedPaths`, LPAC) | `policy_validation` |
+| Policy path the invoking user cannot access | `policy_validation` |
+| Host fault while checking a policy path (I/O error, unresolvable path) | `backend_error` |
+| Missing host capability (e.g. no native PSEC, no denial-capture provider) | `backend_unavailable` |
+| Backend not compiled into this build | `backend_unavailable` |
+| Experimental backend without the experimental opt-in | `backend_unavailable` |
+| Backend for another OS: create-and-run / container lifecycle operations | `unsupported_containment` / `backend_unavailable` |
+
+Unsupported policy is never silently dropped, and no failure above starts the
+run. The phase-specific codes `malformed_request`, `unsupported_containment`,
+`unsupported_phase`, and `malformed_id` also exit `1`.
 
 Envelope lines share stderr with the workload's own output, so a workload can
 print text that looks like an envelope. Treat stderr envelopes as diagnostics,
