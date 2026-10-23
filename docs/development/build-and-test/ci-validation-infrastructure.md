@@ -11,26 +11,6 @@ build/lint/SDK validation is covered by [`pull-requests.md`](pull-requests.md);
 the individual local test scripts are documented in
 [`tests/scripts/README.md`](../../../tests/scripts/README.md).
 
-## W365 Agents offline pipe gate
-
-The native GitHub build jobs and Azure Windows/Linux x64 and macOS build jobs
-run `scripts/ci/test-w365-agents-offline.ps1`. It checks `mxc-sdk` and `mxc_ffi`
-with the default-off `w365_agents` feature disabled and enabled, including `wxc`
-on Windows, then runs the real pipe-worker cancellation and cleanup scenarios.
-The optional `mio`, `rustls`, and `webpki-roots` dependencies are for the preview;
-this gate does not enable them in published release artifacts.
-
-The script requires `TargetTriple` to match the native Rust host. Its
-`TargetDirectory` is a dedicated CI temporary directory, outside the directory
-used to publish binaries. Cross-compilation, an empty selection, or a missing
-or ignored required test cannot satisfy the gate. Every successful child
-scenario must also emit its exact completion marker; the intentionally ignored
-child entry runs only through its watchdog-owning parent tests.
-
-These checks need no cloud credentials and make no W365 service calls. They
-prove local pipe behavior only, not remote execution, cancellation, or Cloud PC
-reclamation. Live backend qualification remains separate from this gate.
-
 ## At a glance
 
 - Validation tests **never build from source**. They download the artifacts

@@ -60,20 +60,16 @@ All paths are repository-relative Windows paths. A directory plus its enumerated
 | Create | `src\mxc-sdk\tests\mxc_contract\v1_1_0_alpha\w365_agents.rs`; `src\mxc-sdk\tests\w365_agents.rs` | Exact-contract and raw native-preview boundary tests |
 | Create/extend | `src\mxc-sdk\tests\mxc_contract\v1_1_0_alpha\fixtures\w365_agents_provision\valid`; `src\mxc-sdk\tests\mxc_contract\v1_1_0_alpha\fixtures\w365_agents_provision\invalid`; existing `start`, `exec`, `stop`, `deprovision` fixture directories | Descriptor-driven positive and negative fixtures |
 | Regenerate | `schemas\dev\mxc-config.schema.1.1.0-alpha.json`; `sdk\node\src\generated\v1_1_0_alpha\wire.ts` | Generated artifacts only; never hand-edit |
-| Modify | `.azure-pipelines\templates\Rust.Build.Job.yml`; `.azure-pipelines\templates\Mac.Build.Job.yml` | Isolated offline feature-on/off validation, not premature artifact publication |
-| Modify | `.github\workflows\Build.Windows.Job.yml`; `.github\workflows\Build.Linux.Job.yml`; `.github\workflows\Build.MacOS.Job.yml` | Run the same native offline gate in primary PR and scheduled artifact builds |
-| Create | `scripts\ci\test-w365-agents-offline.ps1` | Shared native-only package/probe gate, reusing `TestSuiteResults.ps1`; reject zero/skipped selections and missing child markers |
 | Create/modify | `src\mxc-sdk\src\core\mxc_common\unix_io.rs`; `src\mxc-sdk\src\core\mxc_common\mod.rs`; `src\mxc-sdk\src\core\mxc_pty\mod.rs` | Extract the existing worker-local SIGPIPE mask unchanged for neutral reuse |
-| Modify | `docs\development\build-and-test\ci-validation-infrastructure.md` | Document offline gate scope, native evidence, and artifact isolation |
 | Create | `docs\backends\w365-agents\w365-agents.md`; `docs\backends\w365-agents\qualification.md`; `tests\scripts\run_w365_agents_native_preview_tests.ps1` | Native-preview contract, limitations, authorized qualification |
 | Modify | `.github\copilot-instructions.md`; `docs\schema.md`; `docs\development\architecture\versioning.md`; `docs\development\build-and-test\schema-codegen.md` | Directly related architecture, dev-root, build, and generation references |
 
 The legacy file donor is `src\backends\w365agents\common\src` at the pinned legacy SHA. Reuse its compatible clients, codec, validated IDs, metadata and redaction, adapting imports to the consolidated package. Do not copy its crate/build scaffolding, global relay, completed null-pipe process, no-op terminator, raw audit printing or fabricated `-1` exit.
 
-Execution adds the primary GitHub build callers to the CI file map: those reusable
-jobs also feed scheduled validation. One shared offline script avoids five copied
-test runners and uses the repository's existing nonempty/required-test result
-gate. It does not add W365 artifacts or authorize live qualification.
+Build-workflow integration and the standalone offline wrapper are deferred for
+this source-only foundation checkpoint. The Rust tests remain included and must
+run directly on native hosts. Automated coverage remains future work under
+P6.6; this deferral does not satisfy P1.6 or authorize live qualification.
 
 `src\mxc-sdk\src\core\mxc_common\exec_stream.rs`, `state_aware_backend.rs`, `process_util.rs`, and `interruptible_reader.rs` are reuse/reference targets. Keep the existing process adapter and lifecycle traits unchanged. Any newly required shared helper must be narrowly justified; backend-specific machinery stays in W365.
 
@@ -266,6 +262,7 @@ Schedule gates by their prerequisites: Phase 1 checks native package builds and 
 |---|---|---|
 | Feature-independent native packages | `cargo check --manifest-path src\Cargo.toml -p mxc-sdk -p mxc_ffi --no-default-features --all-targets` | Exit 0; no transport dependency required by neutral/exact types |
 | Feature-on native packages | `cargo check --manifest-path src\Cargo.toml -p mxc-sdk -p mxc_ffi --no-default-features --features w365_agents --all-targets` | Exit 0; optional forwarding and native compilation agree |
+| Native foundation pipe tests | `cargo test --manifest-path src\Cargo.toml -p mxc-sdk --no-default-features --features w365_agents --lib w365_pipe_ -- --show-output --color never --test-threads=1` | 12 required passes on Windows or seven on Unix, plus successful child markers; the intentionally ignored child entry runs through its watchdog-owning parents |
 | W365 unit tests, feature off | `cargo test --manifest-path src\Cargo.toml -p mxc-sdk --no-default-features --lib w365` | Exit 0; nonzero neutral/routing/guard test count |
 | W365 unit tests, feature on | `cargo test --manifest-path src\Cargo.toml -p mxc-sdk --no-default-features --features w365_agents --lib w365` | Exit 0; nonzero supported-host pipe, codec, client and driver tests |
 | Exact contracts | `cargo test --manifest-path src\Cargo.toml -p mxc-sdk --no-default-features --test mxc_contract_v0_9_0_alpha --test mxc_contract_v1_0_0 --test mxc_contract_v1_1_0_alpha --test mxc_contract_version_boundaries` | Existing contracts unchanged; new development corpus passes |
@@ -282,7 +279,10 @@ Schedule gates by their prerequisites: Phase 1 checks native package builds and 
 | Feature-on lint | `cargo clippy --manifest-path src\Cargo.toml -p mxc-sdk -p mxc_ffi --all-targets --features w365_agents -- -D warnings` | Exit 0 on supported native hosts |
 | Feature-off lint | `cargo clippy --manifest-path src\Cargo.toml -p mxc-sdk -p mxc_ffi --all-targets --no-default-features -- -D warnings` | Exit 0 |
 
-The cross-platform CI gate executes native builds/tests on Windows, Linux and macOS; compiling a cross target on Windows is not Unix runtime evidence. Put feature-on verification in a separate target directory so it cannot overwrite feature-off artifacts subsequently published by an existing job. Keep live credentials out of CI.
+Run cross-platform checks directly on native Windows, Linux and macOS hosts;
+compiling a cross target on Windows is not Unix runtime evidence. Set
+`CARGO_TARGET_DIR` to an isolated directory for preview checks. Future CI
+integration must preserve that isolation and keep live credentials out of CI.
 
 The live script's mandatory inputs are the fresh binary path, local provision-config path and evidence directory. The runbook requires separately authorized target-side observation before cancellation/timeout assertions. It must exit unsuccessfully with an explicit blocked/not-run record when these prerequisites are missing, not report a passing skipped suite.
 
@@ -313,8 +313,8 @@ P1.1-P1.5 are implemented. P1.6 is blocked on native macOS evidence; Phase 1 is
 not complete. The private pipe and classifier modules remain test-only until
 their production consumers exist.
 
-The shared offline entry point now passes on native Windows x64 and Ubuntu-24.04
-WSL x64. Each run checks feature-off/on compilation of mxc-sdk and mxc_ffi,
+Native checks passed on Windows x64 and Ubuntu-24.04 WSL x64. Each run checked
+feature-off/on compilation of mxc-sdk and mxc_ffi,
 plus wxc on Windows, in an isolated target directory. The Windows pipe suite
 passed 12 tests and the Linux suite passed seven, each with one intentionally
 ignored child entry executed by the watchdog-owning parents. Required passing
@@ -340,16 +340,13 @@ two missing-command failures pass with a Linux-only PATH; the third conformance
 fixture failure was reproduced on an archived, unchanged execution baseline.
 No unrelated assertions or fixtures were changed.
 
-All five CI callers parse as YAML; the shared script parses as PowerShell.
-The shared result-oracle regression scenarios pass on Windows and Linux.
-The initial Windows gate caught interleaved `--nocapture` output; using
-`--show-output` preserves both exact result lines and child markers. A deliberate
-native-host mismatch is rejected before creating build outputs. No GitHub or
-Azure pipeline execution is claimed, including ARM64 jobs.
+CI wiring and the standalone PowerShell wrapper are not included in this
+checkpoint. The Rust code and tests are unchanged. No GitHub or Azure pipeline
+execution is claimed, including ARM64 jobs.
 
-Native macOS compilation and pipe cleanup remain NOT RUN. Adding a macOS CI
-caller or checking its documented runner architecture does not satisfy P1.6.
+Native macOS compilation and pipe cleanup remain NOT RUN. P1.6 stays open until
+those checks run on a native macOS host.
 No contract, cloud lifecycle, transport or live-process implementation has
-started. Publishing this foundation branch is authorized so native CI can run;
+started. Publishing this source-only foundation checkpoint is authorized;
 it does not complete Phase 1 or authorize W365 credential acquisition, live
 service calls or target-host setup.

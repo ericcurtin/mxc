@@ -66,13 +66,6 @@ jobs:
           key: ${{ matrix.target }}-v2
           cache-on-failure: false
 
-      - name: Check W365 feature isolation and native pipe cleanup
-        shell: pwsh
-        run: |
-          & (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci\test-w365-agents-offline.ps1') `
-            -TargetTriple '${{ matrix.target }}' `
-            -TargetDirectory (Join-Path $env:RUNNER_TEMP 'w365-offline')
-
       # hyperlight-host's build.rs writes hyperlight_surrogate.exe to a
       # non-standard target/.../build/hls/ path that rust-cache prunes on save.
       # On a cache hit, cargo thinks the build script is "fresh" and skips it,

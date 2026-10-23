@@ -73,11 +73,6 @@ dotnet test --solution Microsoft.Mxc.Sdk.slnx
 
 Prefer the smallest test command covering the change. Host-dependent backend suites live under `tests/scripts/`; use the applicable backend guide and `docs/development/build-and-test/ci-validation-infrastructure.md` before running or changing them.
 
-The W365 Agents pipe gate is `scripts/ci/test-w365-agents-offline.ps1`. Supply
-the native Rust `TargetTriple` and an isolated `TargetDirectory`; never direct
-preview checks into the directory used to publish release binaries. The gate
-checks feature-off/on compilation and local cleanup, not live W365 behavior.
-
 ## Schema and policy rules
 
 - Production parsing dispatches through exact closed contracts and their
