@@ -144,6 +144,11 @@ request field nor backend changes.
 Several rows may apply. Follow each relevant path. SDKs must not expose a
 field just because it exists in a development contract.
 
+The published v1 SDKs never authorize experimental features: their operations
+always pass the native entry points' `experimental` argument as off. Exercise an
+experimental feature through `wxc-exec --experimental`, and expose it in the
+SDKs' typed request types only when it is promoted to a published contract.
+
 For request format details, read [MXC request JSON](../../schema.md#mxc-request-json).
 For language-specific work, use the SDK READMEs:
 [Rust](../../../src/mxc-sdk/README.md), [.NET](../../../sdk/dotnet/README.md),
