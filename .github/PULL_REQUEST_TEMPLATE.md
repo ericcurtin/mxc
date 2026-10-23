@@ -2,13 +2,14 @@
 <!--
 Describe what this PR changes, why, and any limitations.
 
-For features and changes requiring a spec, link the issue with
-maintainer-applied `feature-accepted`.
-Schema/policy changes, new or changed public APIs, new backends, large
-refactors, and new crates require an approved and merged spec before
-implementation. Include API proposals in the spec PR. Do not open an
-implementation PR, including a draft, before these steps are complete.
-See [contributor guidance](https://github.com/microsoft/mxc/blob/main/CONTRIBUTING.md#get-maintainer-agreement-for-features).
+Thanks for contributing! Link the issue so reviewers can follow the discussion.
+For features and changes requiring a spec, maintainers record the agreed scope
+with `feature-accepted`. Schema/policy changes, new or changed public APIs,
+new backends, large refactors, and new crates need an approved and merged spec
+before implementation, including draft implementation PRs. Include API proposals
+in the spec PR so we can review the design together.
+See [contributor guidance](https://github.com/microsoft/mxc/blob/main/CONTRIBUTING.md#plan-features-together).
+If you are unsure which steps apply, ask in the issue; maintainers will help.
 -->
 
 ## 🔗 References
@@ -16,9 +17,10 @@ See [contributor guidance](https://github.com/microsoft/mxc/blob/main/CONTRIBUTI
 Link related issues, PRs, or docs.
 
 For spec and intermediate implementation PRs, use `Refs #<issue-number>`.
-Do not use closing keywords in the PR description or commit messages, or
-link these PRs as closing the feature issue. Keep it open until implementation,
-functional validation, and documentation are complete.
+Keep the feature issue open for coordination until implementation, functional
+validation, and documentation are complete. Reserve closing keywords in PR
+descriptions and commit messages, and closing links, for the final implementation
+PR.
 -->
 
 ## 🔍 Validation

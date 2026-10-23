@@ -4,11 +4,15 @@
 
 Below is our guidance for how to report issues, propose new features, and submit contributions via Pull Requests (PRs).
 
+Ideas, questions, bug reports, and code contributions are all welcome. You
+do not need a finished design to join the discussion. Sharing your use case
+helps us understand what matters to you and find a useful path forward together.
+
 **Proposing a feature?** Start with
-[maintainer agreement](#get-maintainer-agreement-for-features).
+[planning it together](#plan-features-together).
 
 **Maintaining the project?** See [MAINTAINERS.md](MAINTAINERS.md) for feature
-acceptance and spec-approval responsibilities.
+discussion, review, and follow-through responsibilities.
 
 ## Open Development Workflow
 
@@ -23,7 +27,10 @@ The team triages new issues regularly. During triage, the team uses labels to ca
 Maintainers record feature decisions and requests for more information in
 the GitHub issue.
 
-If you file issues or create PRs, please keep an eye on your GitHub notifications. Issues and PRs that remain unanswered for several days after a request for information may be closed.
+Please keep an eye on GitHub notifications so we can work through questions
+together. If you need more time, let us know. When a discussion becomes inactive,
+maintainers may close it with an explanation; you are welcome to return with
+more information.
 
 ### Maintainer issue investigation
 
@@ -56,11 +63,11 @@ Do not use `/investigate` for a security report. Follow
 
 ---
 
-## Before you start, file an issue
+## Start a conversation
 
-Please follow this simple rule to help us eliminate any unnecessary wasted effort and ensure an efficient use of everyone's time:
-
-> 👉 If you have a question, think you've discovered an issue, would like to propose a new feature, etc., then find or file an issue **BEFORE** starting work to fix or implement it.
+An issue is a place to ask questions, share a problem, or explore an idea with
+the team. Before investing in an implementation, find or open an issue so we
+can connect related work, discuss the approach, and help you focus your effort.
 
 ### Search existing issues first
 
@@ -88,28 +95,35 @@ We provide four issue templates under [`.github/ISSUE_TEMPLATE/`](./.github/ISSU
 * Prefer pasted text (command output, error messages, JSON snippets) over screenshots.
 * **If you intend to implement the fix or feature yourself, say so in the issue!** Otherwise we may pick it up or label it `Help-Wanted`.
 
-### Do not post "+1" comments
+### Show support for an issue
 
-> ⚠️ Do not post "+1", "me too", or similar comments — they add noise to an issue.
-
-If you're affected by an issue but don't have new information to add, upvote the original issue by hitting its 👍 reaction. That way we can measure impact.
+If you're affected by an issue, use the original issue's 👍 reaction to help us
+understand its impact. Comments with additional use cases or reproduction
+details are welcome; reactions work well when you have no new information to add.
 
 ---
 
 ## Contributing fixes and features
 
-For those willing to help fix issues or implement features:
+Thank you for considering a contribution. Early discussion helps contributors
+and maintainers build a shared understanding before committing to larger work.
 
-### Get maintainer agreement for features
+### Plan features together
 
 Follow the [feature authoring guide](./docs/development/guides/authoring-a-new-feature.md):
 
-1. Discuss the feature in an issue. Say if you want to do the work, and wait
-   for a maintainer to apply `feature-accepted`.
-2. Complete any required design/API spec review and merge before starting
-   implementation or opening an implementation PR, including a draft.
-3. Implement the agreed design with functional tests and documentation.
-   Keep the issue open until all agreed work is complete.
+1. Share the problem and desired outcome in an issue. If you would like to
+   contribute, say so. Work with maintainers on scope; they record the shared
+   plan with `feature-accepted`.
+2. For changes needing a design/API spec, develop and review it together in a
+   documentation PR. Approval and merge come before implementation, including
+   draft implementation PRs, so contributors can build on an agreed design.
+3. Implement the agreed design with functional tests and documentation. Use
+   the issue to coordinate progress until the agreed work is complete.
+
+Maintainers will help clarify the next step, explain tradeoffs and decisions,
+and work through review feedback with you. Not every proposal can be included,
+but each deserves a thoughtful response.
 
 The guide defines [when a spec is required](./docs/development/guides/authoring-a-new-feature.md#when-a-spec-is-required),
 templates and file layout, approval labels, and the schema, backend, and SDK
@@ -151,9 +165,9 @@ This project requires contributors to sign the [Microsoft Contributor License Ag
 
 ### Fork, Clone, Branch, and Create your PR
 
-Agree on an approach before implementation. For features, complete the
-[acceptance and spec-review steps](./docs/development/guides/authoring-a-new-feature.md)
-first.
+Start with the approach discussed in your issue. For features, the
+[feature guide](./docs/development/guides/authoring-a-new-feature.md) explains
+how to agree on scope and complete any design review before implementation.
 
 1. Fork the repository if you haven't already.
 2. Clone your fork locally.

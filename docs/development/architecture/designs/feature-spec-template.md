@@ -6,11 +6,12 @@
 Copy to <issue-number>-<feature-name>/README.md under this directory.
 For example: 1234-container-export/README.md.
 Keep supporting API proposals, diagrams, and other files in that folder.
-Replace prompts with short bullets. Yes/no answers are fine when sufficient;
-explain decisions, changed behavior, and risks. For irrelevant sections, write
-"Not applicable" and a short reason. Do not repeat the issue or other specs.
-Use plain language. Remove filler, generic background, and repeated summaries.
-These rules apply to human and AI-assisted drafts.
+Use these questions to guide the design discussion, not as a request for a
+finished design before review. Mark open questions for discussion.
+Short bullets and yes/no answers are welcome when sufficient; explain
+decisions, changed behavior, and risks. For irrelevant sections, write
+"Not applicable" and a short reason. Link existing context rather than
+repeating it. The same guidance applies to human and AI-assisted drafts.
 Keep Status as Proposed until a maintainer approves the design.
 Then change it to Accepted before merge.
 Follow the acceptance and spec-review process in:

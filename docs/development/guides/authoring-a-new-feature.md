@@ -1,11 +1,15 @@
 # Adding a new feature
 
-> **Audience:** MXC contributors
+> **Audience:** MXC developers
 
 This is the feature workflow for executor binaries and the Rust, .NET, and
 Node SDKs. For general contribution, build, and PR guidance, see
 [CONTRIBUTING.md](../../../CONTRIBUTING.md).
 Maintainer responsibilities are in [MAINTAINERS.md](../../../MAINTAINERS.md).
+
+You are welcome to start with a problem or a rough idea. A complete design is
+not needed to begin the conversation. The goal is to shape a useful feature
+together and settle important design questions before you invest in implementation.
 
 | Where you are | Start here |
 | --- | --- |
@@ -15,16 +19,17 @@ Maintainer responsibilities are in [MAINTAINERS.md](../../../MAINTAINERS.md).
 
 ## 1. Start with a GitHub issue
 
-Find or open an issue describing the problem and desired behavior. Say if you
-want to do the work. Agree on scope and contributor with maintainers before
-writing a full spec.
+Find or open an issue describing the problem and desired behavior. Share your
+use case and, if you would like to contribute, say so. Maintainers will help
+discuss scope, related work, and whether a spec is needed before you write one.
 
-Wait for a maintainer to mark the issue `feature-accepted`. Comments, other
-labels, automated triage, reactions, and silence are not acceptance.
+A maintainer records the agreed scope and contributor with `feature-accepted`.
+This gives design work a shared starting point; it is not a release commitment
+or a completed design review. If the next step is unclear, ask in the issue.
 
-Acceptance permits design work; it does not approve the design or promise a
-release. Confirm scope or contributor changes in the issue. If acceptance is
-withdrawn, pause work until maintainers restore it.
+Use the issue to discuss scope or contributor changes. If the agreed direction
+needs to change, maintainers will explain why and work through the options with
+you before more effort goes into the affected work.
 
 For security reports, follow [SECURITY.md](../../../SECURITY.md), not a public issue.
 
@@ -41,9 +46,9 @@ An approved and merged spec PR is required for:
 
 These requirements also apply when the change is filed as a bug fix or task.
 Ordinary bug fixes and documentation corrections do not automatically need a
-spec. Small features outside these categories still need acceptance but may
-use an approach agreed in the issue. Maintainers may require a spec for other
-changes.
+spec. Small features outside these categories can use an approach agreed in
+the issue once scope is accepted. For other changes, maintainers will explain
+if a spec is needed and which questions it should resolve.
 
 ### Write the spec
 
@@ -75,9 +80,11 @@ preserve published commits and add follow-up commits during review.
 Use the templates to explain the problem, solution, backend support, host
 capability checks, compatibility, and validation plan. Consider every backend;
 explain exclusions rather than extending capabilities just to match SDKs.
-Spec approval does not waive the repository's architecture rules.
+The repository's architecture rules also apply to the proposed design.
 
-Keep human and AI-assisted drafts focused:
+The templates are discussion aids. Open questions are welcome in a draft;
+review is where we work through them together. To keep human and AI-assisted
+drafts easy to review:
 
 - Use short bullets, signatures, and examples, not long background sections.
 - Yes/no answers are enough for simple questions; explain decisions and risks.
@@ -89,34 +96,36 @@ Keep human and AI-assisted drafts focused:
   Show important behavior or ownership, not every function.
   Do not repeat the diagram in prose.
 
-### Check approval before implementation
+### Complete design review together
 
 Design and applicable API review form one approval stage. After a maintainer
 approves your design, change its status from **Proposed** to **Accepted**
 before merge.
 
-Before implementing, wait for the required design spec and API proposal to be
-approved and merged.
-Maintainers record their decisions with labels on the tracking issue:
+Review and merge the required design spec and API proposal before implementing.
+This gives contributors and reviewers a stable plan for the work.
+Maintainers record the review decisions with labels on the tracking issue:
 
 | Label | What it means |
 | --- | --- |
-| `feature-accepted` | The feature's scope and contributor are agreed. |
+| `feature-accepted` | Contributors and maintainers have agreed on scope and who plans to contribute. |
 | `design-approved` | The required design spec is approved and merged. |
 | `api-approved` | The applicable API proposal is approved and merged. |
 
 If your feature has no public API changes, API approval is not required.
 Labels do not replace review and merge.
 
-If you need a material change to an approved design or API, discuss it with
-maintainers and update the spec. Wait for the revised spec to be approved and
-merged before implementing the affected changes.
+If implementation reveals a need for a material design or API change, bring
+it back to the discussion and update the spec together. Complete review and
+merge of the revision before implementing the affected changes. Work that
+still follows the agreed design can continue.
 
 ## 3. Implement the accepted design
 
-Do not start implementation or open an implementation PR, including a draft,
-until acceptance and any required spec merge. Link the issue and merged spec
-from each PR.
+With scope agreed and any required spec approved and merged, you are ready to
+implement and open an implementation PR, including a draft. Link the issue
+and merged spec so reviewers can follow the shared plan. A draft implementation
+PR is a useful place to collaborate as the work takes shape.
 
 ### Choose the layers to change
 

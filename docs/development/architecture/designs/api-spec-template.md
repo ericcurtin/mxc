@@ -8,11 +8,12 @@ For example: 1234-container-export/api.md. Link it from the feature's README.md.
 Split proposals only for distinct API areas, not automatically per SDK.
 Review the feature design spec and API proposals in the same PR.
 Describe only API changes; link shared details from the feature design spec.
-Replace prompts with short bullets or signatures, not essays. Yes/no answers
-are fine when sufficient; explain changed behavior, decisions, and risks.
-For irrelevant sections, write "Not applicable" and a short reason.
-Use plain language. Remove filler, generic background, and repeated summaries.
-These rules apply to human and AI-assisted drafts.
+Use these questions to explore the API together. Mark open questions for
+discussion; they do not need to be settled before opening a draft.
+Short bullets, signatures, and yes/no answers are welcome when sufficient;
+explain changed behavior, decisions, and risks. For irrelevant sections,
+write "Not applicable" and a short reason. Link shared context rather than
+repeating it. The same guidance applies to human and AI-assisted drafts.
 Follow the acceptance and spec-review process in:
 https://github.com/microsoft/mxc/blob/main/docs/development/guides/authoring-a-new-feature.md
 -->

@@ -8,12 +8,15 @@ body:
   - type: markdown
     attributes:
       value: |
-        Suggesting a feature does not mean you have to implement it.
+        Thanks for sharing your idea! A problem description or use case is
+        enough to start; you do not need a finished design or a commitment
+        to implement it.
 
-        Want to work on it? Say so here and follow the
-        [contribution process](https://github.com/microsoft/mxc/blob/main/CONTRIBUTING.md#get-maintainer-agreement-for-features).
-        Wait for maintainer acceptance and any required spec approval and
-        merge before starting implementation.
+        Want to work on it? Let us know so we can plan together. Maintainers
+        will help discuss scope and any design review needed before implementation.
+        See the
+        [contribution guide](https://github.com/microsoft/mxc/blob/main/CONTRIBUTING.md#plan-features-together)
+        for the next steps.
   - type: textarea
     attributes:
       label: Description of the new feature / enhancement
