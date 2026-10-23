@@ -103,24 +103,11 @@ test script or test group and the workflow/job that runs it.
   omitted/empty values, errors, and cleanup? Mark cases that do not apply.
 - Are any CI checks being removed or replaced? Yes/No. If yes, explain how
   coverage is preserved. List anything that cannot be tested.
-- Are tests planned or already run? Label actual results separately.
 
 For each distinct scenario, state the input or action and the exact result
 the test will assert. Name the test to extend, or mark it as a proposed test
 and explain how it will run in CI. Full test code is not needed in the spec.
-
-Illustrative plan using the existing experimental-backend gate.
-Replace it with your feature's scenarios; this is not a test result:
-
-```text
-Scenario: wxc-exec create-and-run selects Windows Sandbox without experimental opt-in.
-Expected: backend_unavailable; no container is created.
-Backend: Windows Sandbox.
-Host: Windows 11 24H2, x64, with Windows Sandbox enabled.
-Test: add a case to tests/scripts/run_windows_sandbox_one_shot_tests.ps1.
-CI: Validation.Tests.Scheduled.yml, windows-sandbox matrix entry.
-Status: Planned; not run.
-```
+Report actual test results in the implementation PR.
 
 Use the
 [validation runbook](https://github.com/microsoft/mxc/blob/main/docs/development/build-and-test/ci-validation-infrastructure.md)

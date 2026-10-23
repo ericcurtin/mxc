@@ -79,15 +79,6 @@ Use each language's naming conventions and idiomatic types and syntax.
 Follow existing SDK patterns rather than forcing identical spelling or
 construction across Rust, .NET, and Node.
 
-Example answer format for a proposed timeout option. Replace placeholders
-with the proposed behavior, not assumed MXC defaults:
-
-```text
-timeout: optional; limits: <operation>; units: <units>
-omitted: <default>; empty/null: <behavior>; zero: <allowed/rejected>
-invalid value: <error>; timeout expires: <result/error>
-```
-
 Put workload and policy settings in request types; put per-call controls in
 operation options.
 
@@ -124,7 +115,6 @@ for the format and field reference.
   through each SDK? Link the feature design spec's validation plan and name
   any SDK-specific tests to add or extend.
 - Which versioned API references and examples need updates?
-- Are tests planned or already run? Label actual results separately.
 
 ## Review checklist
 
