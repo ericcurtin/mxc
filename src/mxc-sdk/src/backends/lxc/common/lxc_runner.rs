@@ -439,9 +439,8 @@ impl LxcScriptRunner {
             Ok(None) => request,
             Err(error) => return Err(error.into_response()),
         };
-        if let Err(msg) = crate::mxc_common::filesystem_access::check_delegation(&request.policy) {
-            return Err(ScriptResponse::rejected(&msg));
-        }
+        crate::mxc_common::filesystem_access::check_delegation(&request.policy)
+            .map_err(|error| error.into_response())?;
 
         if self.config.distribution.is_empty() || self.config.release.is_empty() {
             return Err(ScriptResponse::rejected(

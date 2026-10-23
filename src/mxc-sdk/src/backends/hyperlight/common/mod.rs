@@ -490,7 +490,15 @@ impl HyperlightScriptRunner {
                         )));
                     }
                     PathRelationship::Separate => {}
-                    PathRelationship::Indeterminate => {
+                    PathRelationship::Unresolvable(reason) => {
+                        return Err(RunnerError::Setup(format!(
+                            "Hyperlight: cannot verify deniedPaths against allow lists because \
+                             the host could not resolve {allowed:?} or {denied:?} ({reason}). \
+                             With deniedPaths present, MXC fails closed rather than risk an \
+                             unenforced deny."
+                        )));
+                    }
+                    PathRelationship::Ambiguous => {
                         return Err(RunnerError::Policy(format!(
                             "Hyperlight: cannot verify deniedPaths against allow lists because \
                              {allowed:?} or {denied:?} could not be resolved to a canonical \
@@ -1304,11 +1312,13 @@ fn stamp_matches(home: &Path, runtime: HyperlightRuntime) -> bool {
 /// Whether an allowed host path overlaps a denied path after canonicalization,
 /// with a platform-aware lexical fallback for paths that do not exist yet.
 fn path_relationship(allowed: &str, denied: &str) -> PathRelationship {
-    let Ok(allowed) = anchor_policy_path(allowed) else {
-        return PathRelationship::Indeterminate;
-    };
-    let Ok(denied) = anchor_policy_path(denied) else {
-        return PathRelationship::Indeterminate;
+    let (allowed, denied) = match (anchor_policy_path(allowed), anchor_policy_path(denied)) {
+        (Ok(allowed), Ok(denied)) => (allowed, denied),
+        (Err(e), _) | (_, Err(e)) => {
+            return PathRelationship::Unresolvable(format!(
+                "could not read the current directory: {e}"
+            ));
+        }
     };
     match (
         std::fs::canonicalize(&allowed),
@@ -1334,7 +1344,10 @@ fn anchor_policy_path(path: &str) -> Result<PathBuf, std::io::Error> {
 enum PathRelationship {
     Overlaps,
     Separate,
-    Indeterminate,
+    /// The path spelling cannot be compared safely.
+    Ambiguous,
+    /// The host could not resolve a path.
+    Unresolvable(String),
 }
 
 impl PathRelationship {
@@ -1367,16 +1380,19 @@ fn path_relationship_fallback_with(
             let Some(allowed_norm) =
                 WindowsFallbackPath::parse_canonical(allowed, &allowed_resolved)
             else {
-                return PathRelationship::Indeterminate;
+                return PathRelationship::Ambiguous;
             };
             let Some(denied_norm) = WindowsFallbackPath::parse_canonical(denied, &denied_resolved)
             else {
-                return PathRelationship::Indeterminate;
+                return PathRelationship::Ambiguous;
             };
             return PathRelationship::from_overlaps(allowed_norm.overlaps(&denied_norm));
         }
-        (PathCanonical::Unknown, _) | (_, PathCanonical::Unknown) => {
-            return PathRelationship::Indeterminate;
+        (PathCanonical::Unknown, _) => {
+            return PathRelationship::Unresolvable(format!("{allowed:?} could not be examined"));
+        }
+        (_, PathCanonical::Unknown) => {
+            return PathRelationship::Unresolvable(format!("{denied:?} could not be examined"));
         }
         _ => {}
     }
@@ -1494,11 +1510,13 @@ fn has_trim_sensitive_component(path: &str) -> bool {
 
 #[cfg(not(target_os = "windows"))]
 fn path_relationship_fallback(allowed: &str, denied: &str) -> PathRelationship {
-    let Ok(allowed) = resolve_non_windows_fallback_path(Path::new(allowed)) else {
-        return PathRelationship::Indeterminate;
+    let resolve = |path: &str| {
+        resolve_non_windows_fallback_path(Path::new(path))
+            .map_err(|e| PathRelationship::Unresolvable(format!("{path:?}: {e}")))
     };
-    let Ok(denied) = resolve_non_windows_fallback_path(Path::new(denied)) else {
-        return PathRelationship::Indeterminate;
+    let (allowed, denied) = match (resolve(allowed), resolve(denied)) {
+        (Ok(allowed), Ok(denied)) => (allowed, denied),
+        (Err(unresolvable), _) | (_, Err(unresolvable)) => return unresolvable,
     };
     PathRelationship::from_overlaps(denied.starts_with(&allowed) || allowed.starts_with(&denied))
 }
@@ -1943,6 +1961,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn an_unresolvable_host_path_is_a_setup_failure_not_a_policy_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = fresh_tmp("deny-unresolvable");
+        let locked = tmp.join("locked");
+        std::fs::create_dir_all(locked.join("inner")).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let restore = || {
+            let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+            let _ = std::fs::remove_dir_all(&tmp);
+        };
+        // Root ignores directory permissions.
+        if std::fs::canonicalize(locked.join("inner")).is_ok() {
+            restore();
+            return;
+        }
+
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec![locked.join("inner").to_string_lossy().to_string()],
+                denied_paths: vec![tmp.join("secret").to_string_lossy().to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resp = runner().run(&request, &mut Logger::new(Mode::Buffer));
+        restore();
+
+        assert_eq!(resp.failure_phase, FailurePhase::LaunchFailed);
+        assert_eq!(
+            resp.exit_code,
+            FailurePhase::LaunchFailed.failure_exit_code()
+        );
+        assert!(
+            resp.error_message
+                .contains("cannot verify deniedPaths against allow lists"),
+            "got: {}",
+            resp.error_message
+        );
+    }
+
     #[test]
     fn policy_rejects_denied_absolute_descendant_of_missing_relative_mount() {
         let relative_mount = format!("hyperlight-relative-{}", std::process::id());
@@ -2044,17 +2106,17 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn fallback_reports_indeterminate_for_unresolved_windows_paths() {
+    fn fallback_reports_unresolved_windows_paths_as_host_failures() {
         use crate::mxc_common::filesystem_canonical::PathCanonical;
 
-        assert_eq!(
+        assert!(matches!(
             path_relationship_fallback_with(
                 "C:\\MXC\\HyperlightUnknown\\allow",
                 "C:\\MXC\\HyperlightUnknown\\deny",
                 |_| PathCanonical::Unknown,
             ),
-            PathRelationship::Indeterminate
-        );
+            PathRelationship::Unresolvable(_)
+        ));
     }
 
     #[cfg(target_os = "windows")]
@@ -2098,7 +2160,7 @@ mod tests {
         assert!(
             matches!(
                 relationship,
-                PathRelationship::Overlaps | PathRelationship::Indeterminate
+                PathRelationship::Overlaps | PathRelationship::Ambiguous
             ),
             "same resolved tree must overlap or fail closed, got {relationship:?}"
         );
@@ -2120,7 +2182,7 @@ mod tests {
                     _ => PathCanonical::Absent,
                 },
             ),
-            PathRelationship::Indeterminate
+            PathRelationship::Ambiguous
         );
     }
 

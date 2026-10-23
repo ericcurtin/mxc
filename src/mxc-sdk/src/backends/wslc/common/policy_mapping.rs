@@ -342,8 +342,7 @@ pub fn apply_provision_policy_gate(
     let normalized =
         crate::mxc_common::filesystem_object::normalize_object_conflicts(&request.policy, logger)?;
     let effective = normalized.as_ref().unwrap_or(&request.policy);
-    crate::mxc_common::filesystem_access::check_delegation(effective)
-        .map_err(FilesystemPolicyError::Policy)?;
+    crate::mxc_common::filesystem_access::check_delegation(effective)?;
     validate_denied_path_overlap(
         &effective.readwrite_paths,
         &effective.readonly_paths,

@@ -712,7 +712,10 @@ cannot enforce (for example ProcessContainer `filesystem.enumeratePaths`,
 `filesystem.deniedPaths`, or LPAC) is a `policy_validation` rejection naming
 that field, never a silent drop; but a missing host capability the policy
 never reached (for example no native PSEC, or no denial-capture provider) is
-`backend_unavailable`. An experimental backend named without the experimental opt-in is also
+`backend_unavailable`. A path the invoking user cannot access is a
+`policy_validation` rejection, but a host fault while checking a policy path
+(an I/O error or a path that cannot be resolved) is `backend_error`; either
+way the run does not start. An experimental backend named without the experimental opt-in is also
 `backend_unavailable`: the opt-in is an executor invocation mode rather than a
 policy field, so no change to the authored request reaches it. Earlier
 phase-specific codes (`malformed_request`, `unsupported_containment`,
