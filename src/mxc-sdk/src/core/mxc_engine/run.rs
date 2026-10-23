@@ -190,8 +190,6 @@ fn resolve_runner_inner_windows(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, MxcError> {
-    use std::fmt::Write;
-
     match request.containment {
         ContainmentBackend::ProcessContainer => {
             use crate::mxc_common::sandbox_process::Runner;
@@ -204,6 +202,8 @@ fn resolve_runner_inner_windows(
         ContainmentBackend::Wslc => {
             #[cfg(feature = "wslc")]
             {
+                use std::fmt::Write;
+
                 let _ = writeln!(logger, "Using WSLContainer runner");
                 let wslc_config = request.wslc.as_ref().cloned().unwrap_or_default();
                 Ok(ResolvedRunner::without_guard(Box::new(
