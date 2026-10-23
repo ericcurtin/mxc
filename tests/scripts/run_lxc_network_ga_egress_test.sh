@@ -154,6 +154,22 @@ assert_blocked() {
     fi
 }
 
+# Diagnostics only: shows which host mechanism refused io_uring.
+log_io_uring_host_state() {
+    local value
+    if value="$(cat /proc/sys/kernel/io_uring_disabled 2>&1)"; then
+        echo "kernel.io_uring_disabled=$value"
+    else
+        echo "kernel.io_uring_disabled unreadable: $value"
+    fi
+    if command -v getenforce >/dev/null 2>&1; then
+        echo "SELinux: $(getenforce 2>&1)"
+    fi
+    if [ -d /sys/fs/selinux/class/io_uring/perms ]; then
+        echo "SELinux io_uring perms: $(ls /sys/fs/selinux/class/io_uring/perms | tr '\n' ' ')"
+    fi
+}
+
 assert_allowed() {
     if echo "$CASE_OUTPUT" | grep -Fq "MXC_NET_BLOCKED"; then
         fail "$1"
@@ -403,10 +419,11 @@ print(json.dumps({
 PY
 
 run_case "io_uring case: peer allowed on protocol icmp, echo sent from raw and packet sockets opened through io_uring" "$IO_URING_CONFIG"
-# Hosts such as RHEL 10 disable io_uring, so the probe cannot open a ring at all.
-IO_URING_DISABLED="$(cat /proc/sys/kernel/io_uring_disabled 2>/dev/null || echo 0)"
-if [ "$IO_URING_DISABLED" != 0 ] && echo "$CASE_OUTPUT" | grep -Eq "^MXC_IO_URING_SETUP_FAILED errno=1$"; then
-    echo "io_uring case: host sets kernel.io_uring_disabled=$IO_URING_DISABLED, so the workload cannot open io_uring sockets."
+# Hosts such as RHEL refuse io_uring_setup with EPERM, which leaves the workload
+# no io_uring sockets to escape with. Any other setup error is a broken probe.
+if echo "$CASE_OUTPUT" | grep -Fxq "MXC_IO_URING_SETUP_FAILED errno=1"; then
+    log_io_uring_host_state
+    echo "io_uring case: the workload cannot open io_uring (EPERM), so there are no io_uring sockets to test."
 else
     assert_blocked "an echo from a raw or packet socket opened through io_uring reached the peer. io_uring hands the workload the sockets the capability drop takes away."
 fi
