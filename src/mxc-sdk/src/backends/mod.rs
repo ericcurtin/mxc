@@ -40,6 +40,11 @@ pub mod seatbelt {
     pub mod common;
 }
 
+#[cfg(feature = "w365_agents")]
+pub(crate) mod w365agents {
+    pub(crate) mod common;
+}
+
 #[cfg(target_os = "windows")]
 pub mod windows_sandbox {
     pub mod common;

@@ -501,7 +501,7 @@ impl LivePty {
             .spawn({
                 let output_shutdown = output_shutdown.clone();
                 move || {
-                    match block_sigpipe() {
+                    match crate::mxc_common::unix_io::block_sigpipe() {
                         Ok(()) => {
                             let _ = output_setup_sender.send(Ok(()));
                         }
@@ -1139,13 +1139,6 @@ fn create_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)
         set_cloexec(write.as_raw_fd())?;
         Ok((read, write))
     }
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn block_sigpipe() -> std::io::Result<()> {
-    let mut signals = nix::sys::signal::SigSet::empty();
-    signals.add(nix::sys::signal::Signal::SIGPIPE);
-    signals.thread_block().map_err(std::io::Error::from)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -96,6 +96,13 @@ jobs:
       displayName: Test state-aware SDK boundaries
       workingDirectory: $(workingDirectory)
 
+    - pwsh: |
+        & (Join-Path "$(Build.SourcesDirectory)" 'scripts\ci\test-w365-agents-offline.ps1') `
+          -TargetTriple "$(targetTriple)" `
+          -TargetDirectory (Join-Path "$(Agent.TempDirectory)" 'w365-offline')
+      displayName: Check W365 feature isolation and native pipe cleanup
+      workingDirectory: $(workingDirectory)
+
     # --- macOS Code Signing + Notarization (official builds only) ---
     # ESRP handles the full signing flow using Microsoft's Developer ID
     # certificate (CP-401337-Apple). No local cert or codesign needed.

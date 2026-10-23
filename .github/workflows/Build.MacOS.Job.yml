@@ -39,6 +39,13 @@ jobs:
           key: aarch64-apple-darwin-v2
           cache-on-failure: false
 
+      - name: Check W365 feature isolation and native pipe cleanup
+        shell: pwsh
+        run: |
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts\ci\test-w365-agents-offline.ps1') `
+            -TargetTriple 'aarch64-apple-darwin' `
+            -TargetDirectory (Join-Path $env:RUNNER_TEMP 'w365-offline')
+
       # Mac uses package selection rather than feature selection — the
       # workspace has Windows-only crates that won't compile here.
       # unix_test_proxy and mxc_ffi ship alongside mxc-exec-mac.

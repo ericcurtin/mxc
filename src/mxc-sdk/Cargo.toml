@@ -31,6 +31,13 @@ default = []
 wslc = ["link-wslcsdk", "dep:libloading", "dep:tar"]
 link-wslcsdk = ["dep:zip"]
 isolation_session = ["dep:windows-collections", "dep:windows-future"]
+w365_agents = [
+    "dep:mio",
+    "dep:rustls",
+    "dep:webpki-roots",
+    "windows/Wdk_Foundation",
+    "windows/Wdk_Storage_FileSystem",
+]
 test-support = []
 microvm = []
 hyperlight = [
@@ -50,7 +57,9 @@ flatbuffers.workspace = true
 getrandom.workspace = true
 libc.workspace = true
 libloading = { version = "0.8", optional = true }
+mio = { version = "1", default-features = false, features = ["net", "os-poll"], optional = true }
 nix.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 same-file.workspace = true
 schemars = { workspace = true, optional = true }
 serde.workspace = true
@@ -65,6 +74,7 @@ unicode-general-category.workspace = true
 url.workspace = true
 uuid.workspace = true
 widestring.workspace = true
+webpki-roots = { version = "1", optional = true }
 
 [build-dependencies]
 semver = "1"
