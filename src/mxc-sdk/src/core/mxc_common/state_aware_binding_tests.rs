@@ -868,7 +868,7 @@ fn w365_agents_binding_preserves_phase_configs_and_other_backends_reject_them() 
             BoundStateAwareOperation::Deprovision {
                 config: Some(cfg), ..
             } => assert_eq!(cfg.port, Some(8443)),
-            other => panic!("expected bound W365 phase config, got {other:?}"),
+            _ => panic!("expected bound W365 phase config"),
         }
 
         // Non-W365 backends must reject any request carrying a w365Agents block,
