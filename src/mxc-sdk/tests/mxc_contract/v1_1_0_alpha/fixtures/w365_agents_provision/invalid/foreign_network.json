@@ -1,0 +1,10 @@
+{
+  "version": "1.1.0-alpha",
+  "phase": "provision",
+  "containment": "w365_agents",
+  "network": {
+    "egress": {
+      "default": "allow"
+    }
+  }
+}

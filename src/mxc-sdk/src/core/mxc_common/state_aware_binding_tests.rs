@@ -748,3 +748,165 @@ fn session_phases_keep_the_same_validation_execution_and_dry_run_order_as_every_
         Config::Absent,
     );
 }
+
+struct DummyW365Backend;
+
+impl StatefulSandboxBackend for DummyW365Backend {
+    const ID_PREFIX: &'static str = "w365";
+    const BACKEND_KEY: &'static str = "w365_agents";
+    type ProvisionConfig = W365ProvisionConfig;
+    type StartConfig = W365StartConfig;
+    type ExecConfig = W365ExecConfig;
+    type StopConfig = W365StopConfig;
+    type DeprovisionConfig = W365StopConfig;
+    type ProvisionMetadata = ();
+    type StartMetadata = ();
+    type StopMetadata = ();
+    type DeprovisionMetadata = ();
+
+    fn provision(
+        &mut self,
+        _: &ExecutionRequest,
+        _: Option<Self::ProvisionConfig>,
+    ) -> Result<ProvisionResult<()>, MxcError> {
+        Ok(ProvisionResult {
+            sandbox_id:
+                "w365:6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9:9a1f2b3c-4d5e-6f70-8192-a3b4c5d6e7f8"
+                    .into(),
+            metadata: Some(()),
+        })
+    }
+    fn start(
+        &mut self,
+        _: &str,
+        _: &ExecutionRequest,
+        _: Option<Self::StartConfig>,
+    ) -> Result<StartResult<()>, MxcError> {
+        Ok(StartResult { metadata: Some(()) })
+    }
+    fn exec(
+        &mut self,
+        _: &str,
+        _: &ExecutionRequest,
+        _: Option<Self::ExecConfig>,
+        _: ExecStdio,
+    ) -> Result<ExecHandle, MxcError> {
+        Ok(ExecHandle {
+            stdin: null_pipe_handle(),
+            stdout: null_pipe_handle(),
+            stderr: null_pipe_handle(),
+            stdin_closer: None,
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(0))),
+            terminator: Box::new(|| Ok(())),
+        })
+    }
+    fn stop(
+        &mut self,
+        _: &str,
+        _: &ExecutionRequest,
+        _: Option<Self::StopConfig>,
+    ) -> Result<StopResult<()>, MxcError> {
+        Ok(StopResult { metadata: Some(()) })
+    }
+    fn deprovision(
+        &mut self,
+        _: &str,
+        _: &ExecutionRequest,
+        _: Option<Self::DeprovisionConfig>,
+    ) -> Result<DeprovisionResult<()>, MxcError> {
+        Ok(DeprovisionResult { metadata: Some(()) })
+    }
+}
+
+#[test]
+fn w365_agents_binding_preserves_phase_configs_and_other_backends_reject_them() {
+    let w365_id = "w365:6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9:9a1f2b3c-4d5e-6f70-8192-a3b4c5d6e7f8";
+    let prov: Value = serde_json::from_str(
+        r#"{
+            "version":"1.1.0-alpha",
+            "phase":"provision",
+            "containment":"w365_agents",
+            "w365Agents":{"provision":{"poolId":"6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9"}}
+        }"#,
+    )
+    .unwrap();
+    let bound_prov = bind_w365_agents::<DummyW365Backend>(parse(&prov)).unwrap();
+    assert_eq!(bound_prov.phase(), Phase::Provision);
+    let (_, BoundStateAwareOperation::Provision(Some(prov_cfg))) = bound_prov.into_parts() else {
+        panic!("expected bound W365 provision config");
+    };
+    assert_eq!(prov_cfg.pool_id, "6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9");
+
+    for (phase, extra) in [
+        ("start", r#","w365Agents":{"start":{"port":8443}}"#),
+        (
+            "exec",
+            r#","process":{"commandLine":"echo"},"w365Agents":{"exec":{"capability":"contoso.cap"}}"#,
+        ),
+        ("stop", r#","w365Agents":{"stop":{"port":8443}}"#),
+        (
+            "deprovision",
+            r#","w365Agents":{"deprovision":{"port":8443}}"#,
+        ),
+    ] {
+        let json: Value = serde_json::from_str(&format!(
+            r#"{{"version":"1.1.0-alpha","phase":"{phase}","sandboxId":"{w365_id}"{extra}}}"#
+        ))
+        .unwrap();
+        let bound = bind_w365_agents::<DummyW365Backend>(parse(&json)).unwrap();
+        assert_eq!(bound.sandbox_id(), Some(w365_id));
+        match bound.into_parts().1 {
+            BoundStateAwareOperation::Start {
+                config: Some(cfg), ..
+            } => assert_eq!(cfg.port, Some(8443)),
+            BoundStateAwareOperation::Exec {
+                config: Some(cfg), ..
+            } => assert_eq!(cfg.capability.as_deref(), Some("contoso.cap")),
+            BoundStateAwareOperation::Stop {
+                config: Some(cfg), ..
+            } => assert_eq!(cfg.port, Some(8443)),
+            BoundStateAwareOperation::Deprovision {
+                config: Some(cfg), ..
+            } => assert_eq!(cfg.port, Some(8443)),
+            other => panic!("expected bound W365 phase config, got {other:?}"),
+        }
+
+        // Non-W365 backends must reject any request carrying a w365Agents block,
+        // even when the sandboxId prefix matches their own backend.
+        for (prefix, bind_other) in [
+            (
+                "iso:example",
+                (|p| bind_isolation_session::<Recording<Isolation>>(p).map(|_| ()))
+                    as fn(ParsedStateAwareRequest) -> Result<(), MxcError>,
+            ),
+            ("wsb:01234567", |p| {
+                bind_windows_sandbox::<Recording<WindowsSandbox>>(p).map(|_| ())
+            }),
+            ("wslc:0123456789abcdef", |p| {
+                bind_wslc::<Recording<Wslc>>(p).map(|_| ())
+            }),
+        ] {
+            let other_json: Value = serde_json::from_str(&format!(
+                r#"{{"version":"1.1.0-alpha","phase":"{phase}","sandboxId":"{prefix}"{extra}}}"#
+            ))
+            .unwrap();
+            let err = bind_other(parse(&other_json)).unwrap_err();
+            assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+            assert!(err.message.contains("incompatible"), "{}", err.message);
+        }
+    }
+
+    // Conversely, bind_w365_agents rejects non-W365 provision and sandbox IDs.
+    for other_phase in [
+        Phase::Provision,
+        Phase::Start,
+        Phase::Exec,
+        Phase::Stop,
+        Phase::Deprovision,
+    ] {
+        let err =
+            bind_w365_agents::<DummyW365Backend>(parse(&input::<Wslc>(other_phase))).unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+        assert!(err.message.contains("incompatible"), "{}", err.message);
+    }
+}

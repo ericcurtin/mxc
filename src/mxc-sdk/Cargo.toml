@@ -32,11 +32,8 @@ wslc = ["link-wslcsdk", "dep:libloading", "dep:tar"]
 link-wslcsdk = ["dep:zip"]
 isolation_session = ["dep:windows-collections", "dep:windows-future"]
 w365_agents = [
-    "dep:mio",
     "dep:rustls",
     "dep:webpki-roots",
-    "windows/Wdk_Foundation",
-    "windows/Wdk_Storage_FileSystem",
 ]
 test-support = []
 microvm = []
@@ -57,7 +54,6 @@ flatbuffers.workspace = true
 getrandom.workspace = true
 libc.workspace = true
 libloading = { version = "0.8", optional = true }
-mio = { version = "1", default-features = false, features = ["net", "os-poll"], optional = true }
 nix.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 same-file.workspace = true
@@ -125,3 +121,7 @@ required-features = ["isolation_session"]
 [[example]]
 name = "sta_probe"
 required-features = ["isolation_session"]
+
+[[example]]
+name = "w365_exec_demo"
+required-features = ["w365_agents"]

@@ -10,6 +10,8 @@ pub enum Containment {
     WindowsSandbox,
     /// WSL container backend.
     Wslc,
+    /// W365 Agents backend.
+    W365Agents,
 }
 
 impl Containment {
@@ -19,6 +21,7 @@ impl Containment {
             Containment::IsolationSession => "isolation_session",
             Containment::WindowsSandbox => "windows_sandbox",
             Containment::Wslc => "wslc",
+            Containment::W365Agents => "w365_agents",
         }
     }
 
@@ -30,6 +33,7 @@ impl Containment {
             "isolation_session" => Some(Containment::IsolationSession),
             "windows_sandbox" => Some(Containment::WindowsSandbox),
             "wslc" => Some(Containment::Wslc),
+            "w365_agents" => Some(Containment::W365Agents),
             _ => None,
         }
     }

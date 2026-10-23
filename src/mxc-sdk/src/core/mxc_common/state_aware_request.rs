@@ -126,7 +126,7 @@ impl From<crate::mxc_common::wire::Phase> for Phase {
 /// use mxc_sdk::mxc_common::state_aware_request::ParsedStateAwareRequest;
 /// let _ = ParsedStateAwareRequest::new(
 ///     ExecutionRequest::default(),
-///     StateAwareOperation::Start { sandbox_id: "iso:example".into() },
+///     StateAwareOperation::Start { sandbox_id: "iso:example".into(), w365_agents: None },
 /// );
 /// ```
 ///
@@ -139,7 +139,7 @@ impl From<crate::mxc_common::wire::Phase> for Phase {
 /// let _ = ParsedStateAwareRequest {
 ///     request: ExecutionRequest::default(),
 ///     phase: Phase::Exec,
-///     operation: StateAwareOperation::Start { sandbox_id: "iso:example".into() },
+///     operation: StateAwareOperation::Start { sandbox_id: "iso:example".into(), w365_agents: None },
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -227,6 +227,7 @@ mod tests {
     fn execution_flags_do_not_mutate_the_operation_or_policy() {
         let operation = StateAwareOperation::Exec {
             sandbox_id: "".into(),
+            w365_agents: None,
         };
         let mut parsed =
             ParsedStateAwareRequest::new(ExecutionRequest::default(), operation.clone());

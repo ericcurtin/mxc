@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use crate::mxc_contract::dev::state_aware::StateAwareW365AgentsStart;
 use crate::mxc_contract::dev::{OptionalField, Telemetry, Version};
 use serde::Deserialize;
 
@@ -30,4 +31,8 @@ pub struct StartRequest {
     /// Optional telemetry configuration.
     #[serde(default)]
     pub telemetry: OptionalField<Telemetry>,
+
+    /// Optional W365 Agents start settings.
+    #[serde(default)]
+    pub w365_agents: OptionalField<StateAwareW365AgentsStart>,
 }

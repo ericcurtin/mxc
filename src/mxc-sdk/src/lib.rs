@@ -172,6 +172,9 @@ pub use backend_modules::process_container::common as process_container_common;
 #[doc(hidden)]
 pub use backend_modules::seatbelt::common as seatbelt_common;
 #[doc(hidden)]
+#[cfg(feature = "w365_agents")]
+pub use backend_modules::w365agents::common as w365agents_common;
+#[doc(hidden)]
 #[cfg(target_os = "windows")]
 pub use backend_modules::windows_sandbox::common as windows_sandbox_common;
 #[doc(hidden)]

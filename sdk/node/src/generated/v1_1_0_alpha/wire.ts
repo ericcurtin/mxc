@@ -62,6 +62,10 @@ export interface DeprovisionRequest {
    * Exact development contract version.
    */
   version: Version;
+  /**
+   * Optional W365 Agents deprovision settings.
+   */
+  w365Agents?: StateAwareW365AgentsDeprovision;
 }
 
 export type DeprovisionSessionPhase = "deprovision-session";
@@ -108,6 +112,10 @@ export interface ExecRequest {
    * Exact development contract version.
    */
   version: Version;
+  /**
+   * Optional W365 Agents exec settings.
+   */
+  w365Agents?: StateAwareW365AgentsExec;
 }
 
 /**
@@ -710,6 +718,10 @@ export interface StartRequest {
    * Exact development contract version.
    */
   version: Version;
+  /**
+   * Optional W365 Agents start settings.
+   */
+  w365Agents?: StateAwareW365AgentsStart;
 }
 
 /**
@@ -720,6 +732,56 @@ export interface StateAwareIsolationSession {
    * Optional provision-phase settings.
    */
   provision?: IsolationSessionProvision;
+}
+
+/**
+ * State-aware W365 Agents provision wrapper.
+ */
+export interface StateAwareW365Agents {
+  /**
+   * Optional provision-phase settings.
+   */
+  provision?: W365AgentsProvision;
+}
+
+/**
+ * State-aware W365 Agents `deprovision` wrapper.
+ */
+export interface StateAwareW365AgentsDeprovision {
+  /**
+   * Optional deprovision-phase settings.
+   */
+  deprovision?: W365AgentsStop;
+}
+
+/**
+ * State-aware W365 Agents `exec` wrapper.
+ */
+export interface StateAwareW365AgentsExec {
+  /**
+   * Optional exec-phase settings.
+   */
+  exec?: W365AgentsExec;
+}
+
+/**
+ * State-aware W365 Agents `start` wrapper.
+ */
+export interface StateAwareW365AgentsStart {
+  /**
+   * Optional start-phase settings.
+   */
+  start?: W365AgentsStart;
+}
+
+/**
+ * State-aware W365 Agents `stop` wrapper.
+ */
+export interface StateAwareW365AgentsStop {
+  /**
+   * Optional stop-phase settings.
+   */
+  stop?: W365AgentsStop;
 }
 
 /**
@@ -769,6 +831,10 @@ export interface StopRequest {
    * Exact development contract version.
    */
   version: Version;
+  /**
+   * Optional W365 Agents stop settings.
+   */
+  w365Agents?: StateAwareW365AgentsStop;
 }
 
 /**
@@ -814,6 +880,158 @@ export interface Ui {
 export type UiClipboard = "none" | "read" | "write" | "all";
 
 export type Version = "1.1.0-alpha";
+
+export type W365AgentsContainment = "w365_agents";
+
+/**
+ * W365 Agents settings accepted during the `exec` phase.
+ */
+export interface W365AgentsExec {
+  /**
+   * Optional RemotingInterface data-plane bearer token.
+   */
+  bearerToken?: string;
+  /**
+   * Optional reverse-DNS capability name override.
+   */
+  capability?: string;
+  /**
+   * Optional RemotingInterface data-plane DNS suffix override.
+   */
+  dpSuffix?: string;
+  /**
+   * Optional TLS port override.
+   */
+  port?: number;
+}
+
+/**
+ * W365 Agents settings accepted during provisioning.
+ */
+export interface W365AgentsProvision {
+  /**
+   * Optional auxiliary bearer token for agentic user sessions.
+   */
+  agentUserToken?: string;
+  /**
+   * Optional SessionManagement API version override.
+   */
+  cpApiVersion?: string;
+  /**
+   * Optional SessionManagement control-plane host override.
+   */
+  cpBaseUrl?: string;
+  /**
+   * Optional SessionManagement control-plane bearer token.
+   */
+  cpBearerToken?: string;
+  /**
+   * Target pool GUID.
+   */
+  poolId: string;
+  /**
+   * Optional TLS port override.
+   */
+  port?: number;
+  /**
+   * Optional checkout timeout in milliseconds.
+   */
+  provisionTimeoutMs?: number;
+  /**
+   * Optional Entra user object ID (required when `agentUserToken` is supplied).
+   */
+  userObjectId?: string;
+  /**
+   * Optional session kind (`Local`, `HumanUser`, or `Agentic`).
+   */
+  userType?: string;
+}
+
+/**
+ * A complete state-aware `provision` request for `w365_agents`.
+ */
+export interface W365AgentsProvisionRequest {
+  /**
+   * Optional JSON Schema reference for editor validation.
+   */
+  $schema?: string;
+  /**
+   * Optional human-readable annotation ignored by the runtime.
+   */
+  _comment?: unknown;
+  /**
+   * Exact `w365_agents` containment marker.
+   */
+  containment: W365AgentsContainment;
+  /**
+   * Exact `provision` phase marker.
+   */
+  phase: ProvisionPhase;
+  /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
+  /**
+   * Exact development contract version.
+   */
+  version: Version;
+  /**
+   * Optional W365 Agents provision settings.
+   */
+  w365Agents?: StateAwareW365Agents;
+}
+
+/**
+ * W365 Agents settings accepted during the `start` phase.
+ */
+export interface W365AgentsStart {
+  /**
+   * Optional RemotingInterface API version override.
+   */
+  dpApiVersion?: string;
+  /**
+   * Optional RemotingInterface data-plane bearer token.
+   */
+  dpBearerToken?: string;
+  /**
+   * Optional RemotingInterface data-plane DNS suffix override.
+   */
+  dpSuffix?: string;
+  /**
+   * Optional status poll interval in milliseconds.
+   */
+  pollIntervalMs?: number;
+  /**
+   * Optional TLS port override.
+   */
+  port?: number;
+  /**
+   * Optional readiness timeout in milliseconds.
+   */
+  readyTimeoutMs?: number;
+}
+
+/**
+ * W365 Agents settings accepted during the `stop` and `deprovision` phases.
+ */
+export interface W365AgentsStop {
+  /**
+   * Optional SessionManagement API version override.
+   */
+  cpApiVersion?: string;
+  /**
+   * Optional SessionManagement control-plane host override.
+   */
+  cpBaseUrl?: string;
+  /**
+   * Optional SessionManagement control-plane bearer token.
+   */
+  cpBearerToken?: string;
+  /**
+   * Optional TLS port override.
+   */
+  port?: number;
+}
 
 export type WindowsSandboxContainment = "windows_sandbox";
 
@@ -979,4 +1197,4 @@ export interface WslcProvisionSessionRequest {
 /**
  * Exact mutable MXC development configuration contract.
  */
-export type MXCConfiguration = OneShotRequest | WslcDeprovisionSessionRequest | DeprovisionRequest | StopRequest | ExecRequest | StartRequest | WslcProvisionRequest | IsolationSessionProvisionRequest | WindowsSandboxProvisionRequest | WslcProvisionSessionRequest;
+export type MXCConfiguration = OneShotRequest | WslcDeprovisionSessionRequest | DeprovisionRequest | StopRequest | ExecRequest | StartRequest | W365AgentsProvisionRequest | WslcProvisionRequest | IsolationSessionProvisionRequest | WindowsSandboxProvisionRequest | WslcProvisionSessionRequest;

@@ -556,6 +556,10 @@ fn deserialize_development_request(
                     deserialize_development_root(json, "WSLC provision", "1.1", true)
                         .map(ProvisionRequest::Wslc)
                 }
+                Containment::W365Agents => {
+                    deserialize_development_root(json, "W365 Agents provision", "1.1", true)
+                        .map(ProvisionRequest::W365Agents)
+                }
             }?;
             Ok(Request::Provision(request))
         }
@@ -1270,6 +1274,7 @@ fn state_aware_containment_from_id(sandbox_id: &str) -> Option<wire::Containment
         "wslc" => Some(wire::Containment::Wslc),
         "wsb" => Some(wire::Containment::WindowsSandbox),
         "iso" => Some(wire::Containment::IsolationSession),
+        "w365" => Some(wire::Containment::W365Agents),
         _ => None,
     }
 }
@@ -1286,6 +1291,7 @@ fn requested_sandbox_kind(c: Option<&wire::Containment>) -> &'static str {
         Some(wire::Containment::Wslc) => "wslc",
         Some(wire::Containment::Seatbelt) => "seatbelt",
         Some(wire::Containment::IsolationSession) => "isolation_session",
+        Some(wire::Containment::W365Agents) => "w365_agents",
         Some(wire::Containment::Bubblewrap) => "bubblewrap",
     }
 }
@@ -1713,6 +1719,7 @@ fn normalize_state_aware(
                     StateAwareProvision::IsolationSession(_) => wire::Containment::IsolationSession,
                     StateAwareProvision::WindowsSandbox => wire::Containment::WindowsSandbox,
                     StateAwareProvision::Wslc(_) => wire::Containment::Wslc,
+                    StateAwareProvision::W365Agents(_) => wire::Containment::W365Agents,
                 }),
                 StateAwareOperation::Start { .. }
                 | StateAwareOperation::Exec { .. }
@@ -1895,6 +1902,7 @@ mod tests {
         IsolationSession(Option<Option<String>>),
         WindowsSandbox,
         Wslc(Option<(Option<String>, Option<String>)>),
+        W365Agents(Option<(String, Option<String>)>),
     }
 
     impl From<&MxcRequest> for RequestSnapshot {
@@ -1919,6 +1927,11 @@ mod tests {
                             StateAwareProvision::Wslc(config) => {
                                 ProvisionSnapshot::Wslc(config.as_ref().map(|config| {
                                     (config.image.clone(), config.image_tar_path.clone())
+                                }))
+                            }
+                            StateAwareProvision::W365Agents(config) => {
+                                ProvisionSnapshot::W365Agents(config.as_ref().map(|config| {
+                                    (config.pool_id.clone(), config.user_object_id.clone())
                                 }))
                             }
                         }),

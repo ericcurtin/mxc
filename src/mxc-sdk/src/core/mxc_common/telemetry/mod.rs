@@ -622,6 +622,15 @@ fn process_correlation_vector() -> String {
         .unwrap_or_default()
 }
 
+/// The MS-CV for this process, or `""` when telemetry is disabled.
+///
+/// Seeded on `provision` and spun from the relayed value on every other phase by
+/// the executor. When empty, callers must omit the correlation header rather
+/// than send a blank one.
+pub fn current_correlation_vector() -> String {
+    process_correlation_vector()
+}
+
 /// Pure defaulting for the process phase: the stashed value, or `""` (one-shot /
 /// not yet set). Split out (global-free) so the fallback behaviour is
 /// unit-testable without writing the set-once [`PROCESS_PHASE`].

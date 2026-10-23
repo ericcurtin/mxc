@@ -8,8 +8,8 @@ use serde_json::{json, Value};
 
 use super::{
     DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, OneShotRequest,
-    StartRequest, StopRequest, WindowsSandboxProvisionRequest, WslcDeprovisionSessionRequest,
-    WslcProvisionRequest, WslcProvisionSessionRequest,
+    StartRequest, StopRequest, W365AgentsProvisionRequest, WindowsSandboxProvisionRequest,
+    WslcDeprovisionSessionRequest, WslcProvisionRequest, WslcProvisionSessionRequest,
 };
 
 fn subschema<T: JsonSchema>(generator: &mut SchemaGenerator) -> Value {
@@ -35,7 +35,12 @@ fn branch(condition: Value, selected: Value, otherwise: Value) -> Value {
     })
 }
 
-fn provision_dispatch(windows_sandbox: Value, isolation_session: Value, wslc: Value) -> Value {
+fn provision_dispatch(
+    windows_sandbox: Value,
+    isolation_session: Value,
+    wslc: Value,
+    w365_agents: Value,
+) -> Value {
     branch(
         discriminator("containment", "windows_sandbox"),
         windows_sandbox,
@@ -45,7 +50,11 @@ fn provision_dispatch(windows_sandbox: Value, isolation_session: Value, wslc: Va
             branch(
                 discriminator("containment", "wslc"),
                 wslc,
-                Value::Bool(false),
+                branch(
+                    discriminator("containment", "w365_agents"),
+                    w365_agents,
+                    Value::Bool(false),
+                ),
             ),
         ),
     )
@@ -155,13 +164,14 @@ pub fn development_schema() -> Value {
     let windows_sandbox = subschema::<WindowsSandboxProvisionRequest>(&mut generator);
     let isolation_session = subschema::<IsolationSessionProvisionRequest>(&mut generator);
     let wslc = subschema::<WslcProvisionRequest>(&mut generator);
+    let w365_agents = subschema::<W365AgentsProvisionRequest>(&mut generator);
     let start = subschema::<StartRequest>(&mut generator);
     let exec = subschema::<ExecRequest>(&mut generator);
     let stop = subschema::<StopRequest>(&mut generator);
     let deprovision = subschema::<DeprovisionRequest>(&mut generator);
     let wslc_release_session = subschema::<WslcDeprovisionSessionRequest>(&mut generator);
 
-    let provision = provision_dispatch(windows_sandbox, isolation_session, wslc);
+    let provision = provision_dispatch(windows_sandbox, isolation_session, wslc, w365_agents);
     let state_aware = phase_dispatch(
         session_dispatch(wslc_session),
         provision,
@@ -200,6 +210,7 @@ mod tests {
         "WindowsSandboxProvisionRequest",
         "IsolationSessionProvisionRequest",
         "WslcProvisionRequest",
+        "W365AgentsProvisionRequest",
         "StartRequest",
         "ExecRequest",
         "StopRequest",
@@ -219,6 +230,7 @@ mod tests {
                 ("WindowsSandboxProvisionRequest", "provision"),
                 ("IsolationSessionProvisionRequest", "provision"),
                 ("WslcProvisionRequest", "provision"),
+                ("W365AgentsProvisionRequest", "provision"),
                 ("StartRequest", "start"),
                 ("ExecRequest", "exec"),
                 ("StopRequest", "stop"),
@@ -230,6 +242,7 @@ mod tests {
                 ("WindowsSandboxProvisionRequest", "windows_sandbox"),
                 ("IsolationSessionProvisionRequest", "isolation_session"),
                 ("WslcProvisionRequest", "wslc"),
+                ("W365AgentsProvisionRequest", "w365_agents"),
                 ("WslcDeprovisionSessionRequest", "wslc"),
             ],
             compatibility_aliases: false,

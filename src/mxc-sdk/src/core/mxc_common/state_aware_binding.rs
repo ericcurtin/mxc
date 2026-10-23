@@ -7,7 +7,8 @@
 //! Binding neither parses configuration nor supplies backend defaults.
 
 use crate::mxc_common::models::{
-    ContainmentBackend, ExecutionRequest, IsolationSessionProvisionConfig, WslcProvisionConfig,
+    ContainmentBackend, ExecutionRequest, IsolationSessionProvisionConfig, W365ExecConfig,
+    W365ProvisionConfig, W365StartConfig, W365StopConfig, WslcProvisionConfig,
     WslcProvisionSessionConfig,
 };
 use crate::mxc_common::mxc_error::MxcError;
@@ -117,6 +118,83 @@ impl<B: StatefulSandboxBackend> BoundStateAwareRequest<B> {
     ) -> Self {
         Self { request, operation }
     }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each state-aware phase carries an independent typed config extractor"
+    )]
+    fn bind_with_extractors(
+        parsed: ParsedStateAwareRequest,
+        expected: ContainmentBackend,
+        id_prefix: &str,
+        provision: impl FnOnce(StateAwareProvision) -> Result<Option<B::ProvisionConfig>, MxcError>,
+        start: impl FnOnce(Option<W365StartConfig>) -> Result<Option<B::StartConfig>, MxcError>,
+        exec: impl FnOnce(Option<W365ExecConfig>) -> Result<Option<B::ExecConfig>, MxcError>,
+        stop: impl FnOnce(Option<W365StopConfig>) -> Result<Option<B::StopConfig>, MxcError>,
+        deprovision: impl FnOnce(
+            Option<W365StopConfig>,
+        ) -> Result<Option<B::DeprovisionConfig>, MxcError>,
+    ) -> Result<Self, MxcError> {
+        let actual = resolve_backend(&parsed)?;
+        if actual != expected || B::BACKEND_KEY != expected.wire_name() || B::ID_PREFIX != id_prefix
+        {
+            return Err(incompatible_payload(&actual, B::BACKEND_KEY));
+        }
+        let (request, operation) = parsed.into_parts();
+        let operation = match operation {
+            StateAwareOperation::ProvisionSession(config) => {
+                BoundStateAwareOperation::ProvisionSession(config)
+            }
+            StateAwareOperation::Provision(config) => {
+                BoundStateAwareOperation::Provision(provision(config)?)
+            }
+            StateAwareOperation::Start {
+                sandbox_id,
+                w365_agents,
+            } => BoundStateAwareOperation::Start {
+                sandbox_id,
+                config: start(w365_agents)?,
+            },
+            StateAwareOperation::Exec {
+                sandbox_id,
+                w365_agents,
+            } => BoundStateAwareOperation::Exec {
+                sandbox_id,
+                config: exec(w365_agents)?,
+            },
+            StateAwareOperation::Stop {
+                sandbox_id,
+                w365_agents,
+            } => BoundStateAwareOperation::Stop {
+                sandbox_id,
+                config: stop(w365_agents)?,
+            },
+            StateAwareOperation::Deprovision {
+                sandbox_id,
+                w365_agents,
+            } => BoundStateAwareOperation::Deprovision {
+                sandbox_id,
+                config: deprovision(w365_agents)?,
+            },
+            StateAwareOperation::DeprovisionSession { session_id } => {
+                BoundStateAwareOperation::DeprovisionSession { session_id }
+            }
+        };
+        Ok(Self { request, operation })
+    }
+}
+
+fn reject_w365_phase_config<T>(
+    config: Option<T>,
+    backend_key: &str,
+) -> Result<Option<()>, MxcError> {
+    if config.is_some() {
+        return Err(incompatible_payload(
+            &ContainmentBackend::W365Agents,
+            backend_key,
+        ));
+    }
+    Ok(None)
 }
 
 impl<B> BoundStateAwareRequest<B>
@@ -134,42 +212,16 @@ where
         id_prefix: &str,
         provision: impl FnOnce(StateAwareProvision) -> Result<Option<B::ProvisionConfig>, MxcError>,
     ) -> Result<Self, MxcError> {
-        let actual = resolve_backend(&parsed)?;
-        if actual != expected || B::BACKEND_KEY != expected.wire_name() || B::ID_PREFIX != id_prefix
-        {
-            return Err(incompatible_payload(&actual, B::BACKEND_KEY));
-        }
-        let (request, operation) = parsed.into_parts();
-        let operation = match operation {
-            StateAwareOperation::ProvisionSession(config) => {
-                BoundStateAwareOperation::ProvisionSession(config)
-            }
-            StateAwareOperation::Provision(config) => {
-                BoundStateAwareOperation::Provision(provision(config)?)
-            }
-            StateAwareOperation::Start { sandbox_id } => BoundStateAwareOperation::Start {
-                sandbox_id,
-                config: None,
-            },
-            StateAwareOperation::Exec { sandbox_id } => BoundStateAwareOperation::Exec {
-                sandbox_id,
-                config: None,
-            },
-            StateAwareOperation::Stop { sandbox_id } => BoundStateAwareOperation::Stop {
-                sandbox_id,
-                config: None,
-            },
-            StateAwareOperation::Deprovision { sandbox_id } => {
-                BoundStateAwareOperation::Deprovision {
-                    sandbox_id,
-                    config: None,
-                }
-            }
-            StateAwareOperation::DeprovisionSession { session_id } => {
-                BoundStateAwareOperation::DeprovisionSession { session_id }
-            }
-        };
-        Ok(Self { request, operation })
+        Self::bind_with_extractors(
+            parsed,
+            expected,
+            id_prefix,
+            provision,
+            |cfg| reject_w365_phase_config(cfg, B::BACKEND_KEY),
+            |cfg| reject_w365_phase_config(cfg, B::BACKEND_KEY),
+            |cfg| reject_w365_phase_config(cfg, B::BACKEND_KEY),
+            |cfg| reject_w365_phase_config(cfg, B::BACKEND_KEY),
+        )
     }
 }
 
@@ -244,6 +296,34 @@ where
             other => Err(incompatible_payload(&other.containment(), B::BACKEND_KEY)),
         }
     })
+}
+
+/// Bind a W365 Agents operation, preserving optional per-phase configuration.
+pub fn bind_w365_agents<B>(
+    parsed: ParsedStateAwareRequest,
+) -> Result<BoundStateAwareRequest<B>, MxcError>
+where
+    B: StatefulSandboxBackend<
+        ProvisionConfig = W365ProvisionConfig,
+        StartConfig = W365StartConfig,
+        ExecConfig = W365ExecConfig,
+        StopConfig = W365StopConfig,
+        DeprovisionConfig = W365StopConfig,
+    >,
+{
+    BoundStateAwareRequest::bind_with_extractors(
+        parsed,
+        ContainmentBackend::W365Agents,
+        "w365",
+        |provision| match provision {
+            StateAwareProvision::W365Agents(config) => Ok(config),
+            other => Err(incompatible_payload(&other.containment(), B::BACKEND_KEY)),
+        },
+        Ok,
+        Ok,
+        Ok,
+        Ok,
+    )
 }
 
 #[cfg(test)]

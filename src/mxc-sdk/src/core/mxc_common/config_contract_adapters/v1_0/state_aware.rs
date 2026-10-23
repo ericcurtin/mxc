@@ -171,7 +171,13 @@ pub(super) fn start_into_input(
         telemetry,
     } = request;
     let common = state_aware_common(schema, comment, version, telemetry);
-    StateAwareInput::new(common, StateAwareOperation::Start { sandbox_id })
+    StateAwareInput::new(
+        common,
+        StateAwareOperation::Start {
+            sandbox_id,
+            w365_agents: None,
+        },
+    )
 }
 
 pub(super) fn exec_into_input(request: contract::ExecRequest) -> Result<StateAwareInput, WxcError> {
@@ -190,7 +196,13 @@ pub(super) fn exec_into_input(request: contract::ExecRequest) -> Result<StateAwa
     common.process = Some(convert_process(process));
     common.network = network.into_option().map(convert_network);
     common.runtime_config = runtime_config.into_option().map(convert_runtime_config);
-    StateAwareInput::new(common, StateAwareOperation::Exec { sandbox_id })
+    StateAwareInput::new(
+        common,
+        StateAwareOperation::Exec {
+            sandbox_id,
+            w365_agents: None,
+        },
+    )
 }
 
 pub(super) fn stop_into_input(request: contract::StopRequest) -> Result<StateAwareInput, WxcError> {
@@ -203,7 +215,13 @@ pub(super) fn stop_into_input(request: contract::StopRequest) -> Result<StateAwa
         telemetry,
     } = request;
     let common = state_aware_common(schema, comment, version, telemetry);
-    StateAwareInput::new(common, StateAwareOperation::Stop { sandbox_id })
+    StateAwareInput::new(
+        common,
+        StateAwareOperation::Stop {
+            sandbox_id,
+            w365_agents: None,
+        },
+    )
 }
 
 pub(super) fn deprovision_into_input(
@@ -218,7 +236,13 @@ pub(super) fn deprovision_into_input(
         telemetry,
     } = request;
     let common = state_aware_common(schema, comment, version, telemetry);
-    StateAwareInput::new(common, StateAwareOperation::Deprovision { sandbox_id })
+    StateAwareInput::new(
+        common,
+        StateAwareOperation::Deprovision {
+            sandbox_id,
+            w365_agents: None,
+        },
+    )
 }
 
 #[cfg(test)]

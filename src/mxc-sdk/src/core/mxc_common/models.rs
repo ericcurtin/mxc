@@ -35,6 +35,10 @@ pub enum ContainmentBackend {
     /// Isolation Session — process isolation via the IsolationSession API.
     #[serde(rename = "isolation_session")]
     IsolationSession,
+    /// W365 agents — remote Windows 365 sandbox exec via the RemotingInterface
+    /// relay. Cross-platform host-side backend (feature-gated, not OS-gated).
+    #[serde(rename = "w365_agents")]
+    W365Agents,
     /// macOS Seatbelt sandbox backend.
     /// Implemented on top of the OS-bundled sandbox facility (Apple's
     /// internal codename for the App Sandbox / `sandbox_init` machinery
@@ -58,6 +62,7 @@ impl ContainmentBackend {
             ContainmentBackend::Hyperlight => "hyperlight",
             ContainmentBackend::WindowsSandbox => "windows_sandbox",
             ContainmentBackend::IsolationSession => "isolation_session",
+            ContainmentBackend::W365Agents => "w365_agents",
             ContainmentBackend::Seatbelt => "seatbelt",
             ContainmentBackend::Bubblewrap => "bubblewrap",
         }
@@ -74,6 +79,7 @@ impl ContainmentBackend {
             ContainmentBackend::Wslc => Some("wslc"),
             ContainmentBackend::Seatbelt => Some("seatbelt"),
             ContainmentBackend::IsolationSession => Some("isolationSession"),
+            ContainmentBackend::W365Agents => Some("w365Agents"),
             ContainmentBackend::Hyperlight => Some("hyperlight"),
             ContainmentBackend::Bubblewrap
             | ContainmentBackend::MicroVm
@@ -126,6 +132,7 @@ impl From<crate::mxc_common::wire::Containment> for ContainmentBackend {
             W::Wslc => Self::Wslc,
             W::Seatbelt => Self::Seatbelt,
             W::IsolationSession => Self::IsolationSession,
+            W::W365Agents => Self::W365Agents,
             W::Bubblewrap => Self::Bubblewrap,
         }
     }
@@ -273,6 +280,113 @@ pub struct WslcProvisionSessionConfig {
     /// Whether GPU passthrough is enabled.
     pub gpu: Option<bool>,
 }
+
+/// A secret string that redacts itself when formatted with `Debug` or `Display`.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
+pub struct Redacted(String);
+
+impl Redacted {
+    /// Wrap a secret value.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// The real value. Call this only where the secret is actually used.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+impl std::fmt::Display for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+impl From<String> for Redacted {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+/// Runtime-owned state-aware provision config for the W365 Agents backend.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct W365ProvisionConfig {
+    pub pool_id: String,
+    #[serde(default)]
+    pub agent_user_token: Option<Redacted>,
+    #[serde(default)]
+    pub user_object_id: Option<String>,
+    #[serde(default)]
+    pub user_type: Option<String>,
+    #[serde(default)]
+    pub provision_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub cp_base_url: Option<String>,
+    #[serde(default)]
+    pub cp_bearer_token: Option<Redacted>,
+    #[serde(default)]
+    pub cp_api_version: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+/// Runtime-owned state-aware start config for the W365 Agents backend.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct W365StartConfig {
+    #[serde(default)]
+    pub ready_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub poll_interval_ms: Option<u64>,
+    #[serde(default)]
+    pub dp_suffix: Option<String>,
+    #[serde(default)]
+    pub dp_bearer_token: Option<Redacted>,
+    #[serde(default)]
+    pub dp_api_version: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+/// Runtime-owned state-aware exec config for the W365 Agents backend.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct W365ExecConfig {
+    #[serde(default)]
+    pub dp_suffix: Option<String>,
+    #[serde(default)]
+    pub capability: Option<String>,
+    #[serde(default)]
+    pub bearer_token: Option<Redacted>,
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+/// Runtime-owned state-aware stop/deprovision config for the W365 Agents backend.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct W365StopConfig {
+    #[serde(default)]
+    pub cp_base_url: Option<String>,
+    #[serde(default)]
+    pub cp_bearer_token: Option<Redacted>,
+    #[serde(default)]
+    pub cp_api_version: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+/// Deprovision takes the same shape as stop.
+pub type W365DeprovisionConfig = W365StopConfig;
 
 /// Configuration specific to the LXC container backend.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

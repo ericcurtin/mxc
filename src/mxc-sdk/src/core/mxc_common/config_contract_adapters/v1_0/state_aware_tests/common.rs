@@ -73,6 +73,7 @@ fn controlled_input_rejects_every_routing_and_one_shot_field() {
                 common,
                 StateAwareOperation::Start {
                     sandbox_id: "iso:example".to_owned(),
+                    w365_agents: None,
                 }
             )
             .is_err(),

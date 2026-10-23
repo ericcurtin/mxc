@@ -31,7 +31,7 @@ pub(crate) struct BackendRegistration {
     pub(crate) probe_coverage: ProbeCoverage,
 }
 
-static BACKENDS: [BackendRegistration; 10] = [
+static BACKENDS: [BackendRegistration; 11] = [
     BackendRegistration {
         backend: ContainmentBackend::ProcessContainer,
         experimental: false,
@@ -79,6 +79,13 @@ static BACKENDS: [BackendRegistration; 10] = [
         probe_coverage: ProbeCoverage::Detected(&["windows"]),
     },
     BackendRegistration {
+        backend: ContainmentBackend::W365Agents,
+        experimental: true,
+        probe_coverage: ProbeCoverage::NotDetected(
+            "remote Windows 365 Cloud PC backend; host probing does not apply",
+        ),
+    },
+    BackendRegistration {
         backend: ContainmentBackend::Seatbelt,
         experimental: false,
         probe_coverage: ProbeCoverage::Detected(&["macos"]),
@@ -109,6 +116,7 @@ pub(crate) const CANONICAL_BACKEND_NAMES: &[(ContainmentBackend, &str)] = &[
     (ContainmentBackend::Hyperlight, "hyperlight"),
     (ContainmentBackend::WindowsSandbox, "windows_sandbox"),
     (ContainmentBackend::IsolationSession, "isolation_session"),
+    (ContainmentBackend::W365Agents, "w365_agents"),
     (ContainmentBackend::Seatbelt, "seatbelt"),
     (ContainmentBackend::Bubblewrap, "bubblewrap"),
 ];
@@ -147,8 +155,9 @@ pub(crate) fn registration(backend: &ContainmentBackend) -> &'static BackendRegi
         ContainmentBackend::Hyperlight => 5,
         ContainmentBackend::WindowsSandbox => 6,
         ContainmentBackend::IsolationSession => 7,
-        ContainmentBackend::Seatbelt => 8,
-        ContainmentBackend::Bubblewrap => 9,
+        ContainmentBackend::W365Agents => 8,
+        ContainmentBackend::Seatbelt => 9,
+        ContainmentBackend::Bubblewrap => 10,
     };
     &BACKENDS[index]
 }
@@ -165,7 +174,7 @@ mod tests {
             assert!(names.insert(entry.backend.wire_name()));
             assert!(std::ptr::eq(registration(&entry.backend), entry));
         }
-        assert_eq!(names.len(), 10);
+        assert_eq!(names.len(), 11);
     }
 
     #[test]
@@ -177,7 +186,7 @@ mod tests {
             .collect();
         assert_eq!(
             experimental,
-            BTreeSet::from(["microvm", "hyperlight", "windows_sandbox"])
+            BTreeSet::from(["microvm", "hyperlight", "windows_sandbox", "w365_agents"])
         );
     }
 

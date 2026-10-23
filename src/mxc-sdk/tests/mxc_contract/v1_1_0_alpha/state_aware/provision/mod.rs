@@ -3,5 +3,6 @@
 
 #[path = "../../../support/state_aware/provision/isolation_session.rs"]
 mod isolation_session;
+mod w365_agents;
 mod windows_sandbox;
 mod wslc;

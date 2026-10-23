@@ -271,6 +271,7 @@ impl ExecutionRequest {
             ContractVersion::V1_0_0,
             RuntimeOperation::Exec {
                 sandbox_id: sandbox_id.as_str().to_owned(),
+                w365_agents: None,
             },
         )
         .map_err(|error| MxcError::malformed_request(error.to_string()))?;
@@ -537,10 +538,17 @@ mod tests {
 
     fn lifecycle_phases() -> [LifecyclePhase; 3] {
         [
-            ("start", |sandbox_id| RuntimeOperation::Start { sandbox_id }),
-            ("stop", |sandbox_id| RuntimeOperation::Stop { sandbox_id }),
+            ("start", |sandbox_id| RuntimeOperation::Start {
+                sandbox_id,
+                w365_agents: None,
+            }),
+            ("stop", |sandbox_id| RuntimeOperation::Stop {
+                sandbox_id,
+                w365_agents: None,
+            }),
             ("deprovision", |sandbox_id| RuntimeOperation::Deprovision {
                 sandbox_id,
+                w365_agents: None,
             }),
         ]
     }

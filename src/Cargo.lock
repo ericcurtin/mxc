@@ -1530,7 +1530,6 @@ dependencies = [
  "hyperlight-unikraft",
  "libc",
  "libloading",
- "mio",
  "nix",
  "quick-xml",
  "rustls",

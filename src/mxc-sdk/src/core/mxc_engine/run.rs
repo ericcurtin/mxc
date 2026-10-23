@@ -261,6 +261,9 @@ fn resolve_runner_inner_windows(
                 ))
             }
         }
+        ContainmentBackend::W365Agents => Err(MxcError::unsupported_containment(
+            "W365Agents is a state-aware-only backend; invoke it via the state-aware exec phase",
+        )),
     }
 }
 

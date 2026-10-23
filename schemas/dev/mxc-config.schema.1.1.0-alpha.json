@@ -187,7 +187,22 @@
           "then": {
             "else": {
               "else": {
-                "else": false,
+                "else": {
+                  "else": false,
+                  "if": {
+                    "properties": {
+                      "containment": {
+                        "const": "w365_agents"
+                      }
+                    },
+                    "required": [
+                      "containment"
+                    ]
+                  },
+                  "then": {
+                    "$ref": "#/definitions/W365AgentsProvisionRequest"
+                  }
+                },
                 "if": {
                   "properties": {
                     "containment": {
@@ -330,6 +345,10 @@
         "version": {
           "$ref": "#/definitions/Version",
           "description": "Exact development contract version."
+        },
+        "w365Agents": {
+          "$ref": "#/definitions/StateAwareW365AgentsDeprovision",
+          "description": "Optional W365 Agents deprovision settings."
         }
       },
       "required": [
@@ -389,6 +408,10 @@
         "version": {
           "$ref": "#/definitions/Version",
           "description": "Exact development contract version."
+        },
+        "w365Agents": {
+          "$ref": "#/definitions/StateAwareW365AgentsExec",
+          "description": "Optional W365 Agents exec settings."
         }
       },
       "required": [
@@ -1365,6 +1388,10 @@
         "version": {
           "$ref": "#/definitions/Version",
           "description": "Exact development contract version."
+        },
+        "w365Agents": {
+          "$ref": "#/definitions/StateAwareW365AgentsStart",
+          "description": "Optional W365 Agents start settings."
         }
       },
       "required": [
@@ -1381,6 +1408,61 @@
         "provision": {
           "$ref": "#/definitions/IsolationSessionProvision",
           "description": "Optional provision-phase settings."
+        }
+      },
+      "type": "object"
+    },
+    "StateAwareW365Agents": {
+      "additionalProperties": false,
+      "description": "State-aware W365 Agents provision wrapper.",
+      "properties": {
+        "provision": {
+          "$ref": "#/definitions/W365AgentsProvision",
+          "description": "Optional provision-phase settings."
+        }
+      },
+      "type": "object"
+    },
+    "StateAwareW365AgentsDeprovision": {
+      "additionalProperties": false,
+      "description": "State-aware W365 Agents `deprovision` wrapper.",
+      "properties": {
+        "deprovision": {
+          "$ref": "#/definitions/W365AgentsStop",
+          "description": "Optional deprovision-phase settings."
+        }
+      },
+      "type": "object"
+    },
+    "StateAwareW365AgentsExec": {
+      "additionalProperties": false,
+      "description": "State-aware W365 Agents `exec` wrapper.",
+      "properties": {
+        "exec": {
+          "$ref": "#/definitions/W365AgentsExec",
+          "description": "Optional exec-phase settings."
+        }
+      },
+      "type": "object"
+    },
+    "StateAwareW365AgentsStart": {
+      "additionalProperties": false,
+      "description": "State-aware W365 Agents `start` wrapper.",
+      "properties": {
+        "start": {
+          "$ref": "#/definitions/W365AgentsStart",
+          "description": "Optional start-phase settings."
+        }
+      },
+      "type": "object"
+    },
+    "StateAwareW365AgentsStop": {
+      "additionalProperties": false,
+      "description": "State-aware W365 Agents `stop` wrapper.",
+      "properties": {
+        "stop": {
+          "$ref": "#/definitions/W365AgentsStop",
+          "description": "Optional stop-phase settings."
         }
       },
       "type": "object"
@@ -1438,6 +1520,10 @@
         "version": {
           "$ref": "#/definitions/Version",
           "description": "Exact development contract version."
+        },
+        "w365Agents": {
+          "$ref": "#/definitions/StateAwareW365AgentsStop",
+          "description": "Optional W365 Agents stop settings."
         }
       },
       "required": [
@@ -1541,6 +1627,188 @@
           "type": "string"
         }
       ]
+    },
+    "W365AgentsContainment": {
+      "enum": [
+        "w365_agents"
+      ],
+      "type": "string"
+    },
+    "W365AgentsExec": {
+      "additionalProperties": false,
+      "description": "W365 Agents settings accepted during the `exec` phase.",
+      "properties": {
+        "bearerToken": {
+          "description": "Optional RemotingInterface data-plane bearer token.",
+          "type": "string"
+        },
+        "capability": {
+          "description": "Optional reverse-DNS capability name override.",
+          "type": "string"
+        },
+        "dpSuffix": {
+          "description": "Optional RemotingInterface data-plane DNS suffix override.",
+          "type": "string"
+        },
+        "port": {
+          "description": "Optional TLS port override.",
+          "maximum": 65535,
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "W365AgentsProvision": {
+      "additionalProperties": false,
+      "description": "W365 Agents settings accepted during provisioning.",
+      "properties": {
+        "agentUserToken": {
+          "description": "Optional auxiliary bearer token for agentic user sessions.",
+          "type": "string"
+        },
+        "cpApiVersion": {
+          "description": "Optional SessionManagement API version override.",
+          "type": "string"
+        },
+        "cpBaseUrl": {
+          "description": "Optional SessionManagement control-plane host override.",
+          "type": "string"
+        },
+        "cpBearerToken": {
+          "description": "Optional SessionManagement control-plane bearer token.",
+          "type": "string"
+        },
+        "poolId": {
+          "description": "Target pool GUID.",
+          "type": "string"
+        },
+        "port": {
+          "description": "Optional TLS port override.",
+          "maximum": 65535,
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "provisionTimeoutMs": {
+          "description": "Optional checkout timeout in milliseconds.",
+          "maximum": 18446744073709551615,
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "userObjectId": {
+          "description": "Optional Entra user object ID (required when `agentUserToken` is supplied).",
+          "type": "string"
+        },
+        "userType": {
+          "description": "Optional session kind (`Local`, `HumanUser`, or `Agentic`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "poolId"
+      ],
+      "type": "object"
+    },
+    "W365AgentsProvisionRequest": {
+      "additionalProperties": false,
+      "description": "A complete state-aware `provision` request for `w365_agents`.",
+      "properties": {
+        "$schema": {
+          "description": "Optional JSON Schema reference for editor validation.",
+          "type": "string"
+        },
+        "_comment": {
+          "description": "Optional human-readable annotation ignored by the runtime."
+        },
+        "containment": {
+          "$ref": "#/definitions/W365AgentsContainment",
+          "description": "Exact `w365_agents` containment marker."
+        },
+        "phase": {
+          "$ref": "#/definitions/ProvisionPhase",
+          "description": "Exact `provision` phase marker."
+        },
+        "telemetry": {
+          "$ref": "#/definitions/Telemetry",
+          "description": "Optional telemetry configuration."
+        },
+        "version": {
+          "$ref": "#/definitions/Version",
+          "description": "Exact development contract version."
+        },
+        "w365Agents": {
+          "$ref": "#/definitions/StateAwareW365Agents",
+          "description": "Optional W365 Agents provision settings."
+        }
+      },
+      "required": [
+        "containment",
+        "phase",
+        "version"
+      ],
+      "type": "object"
+    },
+    "W365AgentsStart": {
+      "additionalProperties": false,
+      "description": "W365 Agents settings accepted during the `start` phase.",
+      "properties": {
+        "dpApiVersion": {
+          "description": "Optional RemotingInterface API version override.",
+          "type": "string"
+        },
+        "dpBearerToken": {
+          "description": "Optional RemotingInterface data-plane bearer token.",
+          "type": "string"
+        },
+        "dpSuffix": {
+          "description": "Optional RemotingInterface data-plane DNS suffix override.",
+          "type": "string"
+        },
+        "pollIntervalMs": {
+          "description": "Optional status poll interval in milliseconds.",
+          "maximum": 18446744073709551615,
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "port": {
+          "description": "Optional TLS port override.",
+          "maximum": 65535,
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "readyTimeoutMs": {
+          "description": "Optional readiness timeout in milliseconds.",
+          "maximum": 18446744073709551615,
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "W365AgentsStop": {
+      "additionalProperties": false,
+      "description": "W365 Agents settings accepted during the `stop` and `deprovision` phases.",
+      "properties": {
+        "cpApiVersion": {
+          "description": "Optional SessionManagement API version override.",
+          "type": "string"
+        },
+        "cpBaseUrl": {
+          "description": "Optional SessionManagement control-plane host override.",
+          "type": "string"
+        },
+        "cpBearerToken": {
+          "description": "Optional SessionManagement control-plane bearer token.",
+          "type": "string"
+        },
+        "port": {
+          "description": "Optional TLS port override.",
+          "maximum": 65535,
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
     },
     "WindowsSandboxContainment": {
       "enum": [

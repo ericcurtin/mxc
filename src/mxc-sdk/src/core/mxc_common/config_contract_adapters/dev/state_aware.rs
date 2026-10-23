@@ -6,7 +6,8 @@ use crate::mxc_common::config_contract_adapters::dev::common::{
 };
 use crate::mxc_common::error::WxcError;
 use crate::mxc_common::models::{
-    IsolationSessionProvisionConfig, WslcProvisionConfig, WslcProvisionSessionConfig,
+    IsolationSessionProvisionConfig, Redacted, W365ExecConfig, W365ProvisionConfig,
+    W365StartConfig, W365StopConfig, WslcProvisionConfig, WslcProvisionSessionConfig,
 };
 use crate::mxc_common::state_aware_input::StateAwareInput;
 use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
@@ -119,6 +120,115 @@ fn convert_state_aware_wslc_session(
         .map(convert_wslc_provision_session)
 }
 
+fn convert_w365_provision(value: contract::W365AgentsProvision) -> W365ProvisionConfig {
+    let contract::W365AgentsProvision {
+        pool_id,
+        agent_user_token,
+        user_object_id,
+        user_type,
+        provision_timeout_ms,
+        cp_base_url,
+        cp_bearer_token,
+        cp_api_version,
+        port,
+    } = value;
+    W365ProvisionConfig {
+        pool_id,
+        agent_user_token: agent_user_token.into_option().map(Redacted::new),
+        user_object_id: user_object_id.into_option(),
+        user_type: user_type.into_option(),
+        provision_timeout_ms: provision_timeout_ms.into_option(),
+        cp_base_url: cp_base_url.into_option(),
+        cp_bearer_token: cp_bearer_token.into_option().map(Redacted::new),
+        cp_api_version: cp_api_version.into_option(),
+        port: port.into_option(),
+    }
+}
+
+fn convert_state_aware_w365_provision(
+    value: contract::StateAwareW365Agents,
+) -> Option<W365ProvisionConfig> {
+    let contract::StateAwareW365Agents { provision } = value;
+    provision.into_option().map(convert_w365_provision)
+}
+
+fn convert_w365_start(value: contract::W365AgentsStart) -> W365StartConfig {
+    let contract::W365AgentsStart {
+        ready_timeout_ms,
+        poll_interval_ms,
+        dp_suffix,
+        dp_bearer_token,
+        dp_api_version,
+        port,
+    } = value;
+    W365StartConfig {
+        ready_timeout_ms: ready_timeout_ms.into_option(),
+        poll_interval_ms: poll_interval_ms.into_option(),
+        dp_suffix: dp_suffix.into_option(),
+        dp_bearer_token: dp_bearer_token.into_option().map(Redacted::new),
+        dp_api_version: dp_api_version.into_option(),
+        port: port.into_option(),
+    }
+}
+
+fn convert_state_aware_w365_start(value: contract::StateAwareW365AgentsStart) -> W365StartConfig {
+    let contract::StateAwareW365AgentsStart { start } = value;
+    start
+        .into_option()
+        .map_or_else(W365StartConfig::default, convert_w365_start)
+}
+
+fn convert_w365_exec(value: contract::W365AgentsExec) -> W365ExecConfig {
+    let contract::W365AgentsExec {
+        dp_suffix,
+        capability,
+        bearer_token,
+        port,
+    } = value;
+    W365ExecConfig {
+        dp_suffix: dp_suffix.into_option(),
+        capability: capability.into_option(),
+        bearer_token: bearer_token.into_option().map(Redacted::new),
+        port: port.into_option(),
+    }
+}
+
+fn convert_state_aware_w365_exec(value: contract::StateAwareW365AgentsExec) -> W365ExecConfig {
+    let contract::StateAwareW365AgentsExec { exec } = value;
+    exec.into_option()
+        .map_or_else(W365ExecConfig::default, convert_w365_exec)
+}
+
+fn convert_w365_stop(value: contract::W365AgentsStop) -> W365StopConfig {
+    let contract::W365AgentsStop {
+        cp_base_url,
+        cp_bearer_token,
+        cp_api_version,
+        port,
+    } = value;
+    W365StopConfig {
+        cp_base_url: cp_base_url.into_option(),
+        cp_bearer_token: cp_bearer_token.into_option().map(Redacted::new),
+        cp_api_version: cp_api_version.into_option(),
+        port: port.into_option(),
+    }
+}
+
+fn convert_state_aware_w365_stop(value: contract::StateAwareW365AgentsStop) -> W365StopConfig {
+    let contract::StateAwareW365AgentsStop { stop } = value;
+    stop.into_option()
+        .map_or_else(W365StopConfig::default, convert_w365_stop)
+}
+
+fn convert_state_aware_w365_deprovision(
+    value: contract::StateAwareW365AgentsDeprovision,
+) -> W365StopConfig {
+    let contract::StateAwareW365AgentsDeprovision { deprovision } = value;
+    deprovision
+        .into_option()
+        .map_or_else(W365StopConfig::default, convert_w365_stop)
+}
+
 fn state_aware_common(
     schema: contract::OptionalField<String>,
     comment: contract::OptionalField<serde_json::Value>,
@@ -180,6 +290,9 @@ pub(super) fn provision_into_input(
             windows_sandbox_provision_into_input(request)
         }
         contract::ProvisionRequest::Wslc(request) => wslc_provision_into_input(request),
+        contract::ProvisionRequest::W365Agents(request) => {
+            w365_agents_provision_into_input(request)
+        }
     }
 }
 
@@ -251,6 +364,28 @@ fn wslc_provision_into_input(
     )
 }
 
+fn w365_agents_provision_into_input(
+    request: contract::W365AgentsProvisionRequest,
+) -> Result<StateAwareInput, WxcError> {
+    let contract::W365AgentsProvisionRequest {
+        schema,
+        comment,
+        version,
+        phase: contract::ProvisionPhase,
+        containment: contract::W365AgentsContainment,
+        telemetry,
+        w365_agents,
+    } = request;
+    let provision = w365_agents
+        .into_option()
+        .and_then(convert_state_aware_w365_provision);
+    let common = state_aware_common(schema, comment, version, telemetry);
+    StateAwareInput::new(
+        common,
+        StateAwareOperation::Provision(StateAwareProvision::W365Agents(provision)),
+    )
+}
+
 pub(super) fn start_into_input(
     request: contract::StartRequest,
 ) -> Result<StateAwareInput, WxcError> {
@@ -261,9 +396,19 @@ pub(super) fn start_into_input(
         phase: contract::StartPhase,
         sandbox_id,
         telemetry,
+        w365_agents,
     } = request;
+    let w365_agents = w365_agents
+        .into_option()
+        .map(convert_state_aware_w365_start);
     let common = state_aware_common(schema, comment, version, telemetry);
-    StateAwareInput::new(common, StateAwareOperation::Start { sandbox_id })
+    StateAwareInput::new(
+        common,
+        StateAwareOperation::Start {
+            sandbox_id,
+            w365_agents,
+        },
+    )
 }
 
 pub(super) fn exec_into_input(request: contract::ExecRequest) -> Result<StateAwareInput, WxcError> {
@@ -277,12 +422,20 @@ pub(super) fn exec_into_input(request: contract::ExecRequest) -> Result<StateAwa
         network,
         runtime_config,
         telemetry,
+        w365_agents,
     } = request;
+    let w365_agents = w365_agents.into_option().map(convert_state_aware_w365_exec);
     let mut common = state_aware_common(schema, comment, version, telemetry);
     common.process = Some(convert_process(process));
     common.network = network.into_option().map(convert_network);
     common.runtime_config = runtime_config.into_option().map(convert_runtime_config);
-    StateAwareInput::new(common, StateAwareOperation::Exec { sandbox_id })
+    StateAwareInput::new(
+        common,
+        StateAwareOperation::Exec {
+            sandbox_id,
+            w365_agents,
+        },
+    )
 }
 
 pub(super) fn stop_into_input(request: contract::StopRequest) -> Result<StateAwareInput, WxcError> {
@@ -293,9 +446,17 @@ pub(super) fn stop_into_input(request: contract::StopRequest) -> Result<StateAwa
         phase: contract::StopPhase,
         sandbox_id,
         telemetry,
+        w365_agents,
     } = request;
+    let w365_agents = w365_agents.into_option().map(convert_state_aware_w365_stop);
     let common = state_aware_common(schema, comment, version, telemetry);
-    StateAwareInput::new(common, StateAwareOperation::Stop { sandbox_id })
+    StateAwareInput::new(
+        common,
+        StateAwareOperation::Stop {
+            sandbox_id,
+            w365_agents,
+        },
+    )
 }
 
 pub(super) fn deprovision_into_input(
@@ -308,9 +469,19 @@ pub(super) fn deprovision_into_input(
         phase: contract::DeprovisionPhase,
         sandbox_id,
         telemetry,
+        w365_agents,
     } = request;
+    let w365_agents = w365_agents
+        .into_option()
+        .map(convert_state_aware_w365_deprovision);
     let common = state_aware_common(schema, comment, version, telemetry);
-    StateAwareInput::new(common, StateAwareOperation::Deprovision { sandbox_id })
+    StateAwareInput::new(
+        common,
+        StateAwareOperation::Deprovision {
+            sandbox_id,
+            w365_agents,
+        },
+    )
 }
 
 pub(super) fn deprovision_session_into_input(

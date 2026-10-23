@@ -3,8 +3,8 @@
 
 use mxc_sdk::mxc_contract::dev::{
     parse_request, DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, Request,
-    StartRequest, StopRequest, WindowsSandboxProvisionRequest, WslcDeprovisionSessionRequest,
-    WslcProvisionRequest, WslcProvisionSessionRequest,
+    StartRequest, StopRequest, W365AgentsProvisionRequest, WindowsSandboxProvisionRequest,
+    WslcDeprovisionSessionRequest, WslcProvisionRequest, WslcProvisionSessionRequest,
 };
 
 const VERSION: &str = "v1_1_0_alpha";
@@ -38,6 +38,7 @@ fn accepts_and_rejects_every_discovered_fixture() {
     assert_root_fixtures::<WindowsSandboxProvisionRequest>("windows_sandbox_provision");
     assert_root_fixtures::<IsolationSessionProvisionRequest>("isolation_session_provision");
     assert_root_fixtures::<WslcProvisionRequest>("wslc_provision");
+    assert_root_fixtures::<W365AgentsProvisionRequest>("w365_agents_provision");
     assert_root_fixtures::<StartRequest>("start");
     assert_root_fixtures::<ExecRequest>("exec");
     assert_root_fixtures::<StopRequest>("stop");

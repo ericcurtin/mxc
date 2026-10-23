@@ -262,6 +262,11 @@ pub use state_aware::{
     ProvisionSessionPhase, StateAwareWslcSession, WslcProvisionSession, WslcProvisionSessionRequest,
 };
 pub use state_aware::{StartPhase, StartRequest};
+pub use state_aware::{
+    StateAwareW365Agents, StateAwareW365AgentsDeprovision, StateAwareW365AgentsExec,
+    StateAwareW365AgentsStart, StateAwareW365AgentsStop, W365AgentsContainment, W365AgentsExec,
+    W365AgentsProvision, W365AgentsProvisionRequest, W365AgentsStart, W365AgentsStop,
+};
 pub use state_aware::{StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionRequest};
 pub use state_aware::{StopPhase, StopRequest};
 pub use state_aware::{WindowsSandboxContainment, WindowsSandboxProvisionRequest};

@@ -131,6 +131,33 @@ impl SdkStateAwareInput {
                     .to_string(),
             ));
         }
+        let is_w365_agents = matches!(
+            operation,
+            StateAwareOperation::Provision(
+                crate::mxc_common::state_aware_operation::StateAwareProvision::W365Agents(_)
+            ) | StateAwareOperation::Start {
+                w365_agents: Some(_),
+                ..
+            } | StateAwareOperation::Exec {
+                w365_agents: Some(_),
+                ..
+            } | StateAwareOperation::Stop {
+                w365_agents: Some(_),
+                ..
+            } | StateAwareOperation::Deprovision {
+                w365_agents: Some(_),
+                ..
+            }
+        ) || operation
+            .sandbox_id()
+            .is_some_and(|sandbox_id| sandbox_id.starts_with("w365:"));
+        if is_w365_agents {
+            return Err(WxcError::ConfigParse(
+                "typed state-aware Rust SDK requests do not support W365 Agents; \
+                 use raw exact 1.1.0-alpha JSON"
+                    .to_string(),
+            ));
+        }
         if wslc_port_mappings_requested(&operation) && version != ContractVersion::V1_1_0Alpha {
             return Err(WxcError::ConfigParse(format!(
                 "WSLC state-aware provision port mappings require schema version \
@@ -286,15 +313,19 @@ mod tests {
         for operation in [
             StateAwareOperation::Start {
                 sandbox_id: "wsb:abcd1234".to_string(),
+                w365_agents: None,
             },
             StateAwareOperation::Exec {
                 sandbox_id: "wsb:abcd1234".to_string(),
+                w365_agents: None,
             },
             StateAwareOperation::Stop {
                 sandbox_id: "wsb:abcd1234".to_string(),
+                w365_agents: None,
             },
             StateAwareOperation::Deprovision {
                 sandbox_id: "wsb:abcd1234".to_string(),
+                w365_agents: None,
             },
         ] {
             let error = SdkStateAwareInput::new(ContractVersion::V1_0_0, operation)

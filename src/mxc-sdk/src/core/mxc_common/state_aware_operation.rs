@@ -10,8 +10,8 @@
 //! never reads it.
 
 use crate::mxc_common::models::{
-    ContainmentBackend, IsolationSessionProvisionConfig, WslcProvisionConfig,
-    WslcProvisionSessionConfig,
+    ContainmentBackend, IsolationSessionProvisionConfig, W365ExecConfig, W365ProvisionConfig,
+    W365StartConfig, W365StopConfig, WslcProvisionConfig, WslcProvisionSessionConfig,
 };
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::state_aware_request::Phase;
@@ -25,6 +25,8 @@ pub enum StateAwareProvision {
     WindowsSandbox,
     /// An omitted image remains absent until the WSLC backend chooses a default.
     Wslc(Option<WslcProvisionConfig>),
+    /// W365 Agents provision configuration.
+    W365Agents(Option<W365ProvisionConfig>),
 }
 
 impl StateAwareProvision {
@@ -34,6 +36,7 @@ impl StateAwareProvision {
             Self::IsolationSession(_) => ContainmentBackend::IsolationSession,
             Self::WindowsSandbox => ContainmentBackend::WindowsSandbox,
             Self::Wslc(_) => ContainmentBackend::Wslc,
+            Self::W365Agents(_) => ContainmentBackend::W365Agents,
         }
     }
 }
@@ -50,11 +53,25 @@ impl StateAwareProvision {
 pub enum StateAwareOperation {
     ProvisionSession(Option<WslcProvisionSessionConfig>),
     Provision(StateAwareProvision),
-    Start { sandbox_id: String },
-    Exec { sandbox_id: String },
-    Stop { sandbox_id: String },
-    Deprovision { sandbox_id: String },
-    DeprovisionSession { session_id: String },
+    Start {
+        sandbox_id: String,
+        w365_agents: Option<W365StartConfig>,
+    },
+    Exec {
+        sandbox_id: String,
+        w365_agents: Option<W365ExecConfig>,
+    },
+    Stop {
+        sandbox_id: String,
+        w365_agents: Option<W365StopConfig>,
+    },
+    Deprovision {
+        sandbox_id: String,
+        w365_agents: Option<W365StopConfig>,
+    },
+    DeprovisionSession {
+        session_id: String,
+    },
 }
 
 impl StateAwareOperation {
@@ -93,10 +110,10 @@ impl StateAwareOperation {
             Self::ProvisionSession(_) | Self::Provision(_) | Self::DeprovisionSession { .. } => {
                 None
             }
-            Self::Start { sandbox_id }
-            | Self::Exec { sandbox_id }
-            | Self::Stop { sandbox_id }
-            | Self::Deprovision { sandbox_id } => Some(sandbox_id),
+            Self::Start { sandbox_id, .. }
+            | Self::Exec { sandbox_id, .. }
+            | Self::Stop { sandbox_id, .. }
+            | Self::Deprovision { sandbox_id, .. } => Some(sandbox_id),
         }
     }
 
@@ -183,6 +200,10 @@ mod tests {
                 ContainmentBackend::WindowsSandbox,
             ),
             (StateAwareProvision::Wslc(None), ContainmentBackend::Wslc),
+            (
+                StateAwareProvision::W365Agents(None),
+                ContainmentBackend::W365Agents,
+            ),
         ] {
             let operation = StateAwareOperation::Provision(provision);
             assert_eq!(operation.phase(), Phase::Provision);
@@ -198,24 +219,28 @@ mod tests {
             (
                 StateAwareOperation::Start {
                     sandbox_id: id.into(),
+                    w365_agents: None,
                 },
                 Phase::Start,
             ),
             (
                 StateAwareOperation::Exec {
                     sandbox_id: id.into(),
+                    w365_agents: None,
                 },
                 Phase::Exec,
             ),
             (
                 StateAwareOperation::Stop {
                     sandbox_id: id.into(),
+                    w365_agents: None,
                 },
                 Phase::Stop,
             ),
             (
                 StateAwareOperation::Deprovision {
                     sandbox_id: id.into(),
+                    w365_agents: None,
                 },
                 Phase::Deprovision,
             ),

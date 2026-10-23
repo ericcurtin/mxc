@@ -28,7 +28,8 @@ fn exec_preserves_process_network_telemetry_and_empty_values() {
             assert_eq!(
                 operation,
                 StateAwareOperation::Exec {
-                    sandbox_id: id.to_owned()
+                    sandbox_id: id.to_owned(),
+                    w365_agents: None,
                 }
             );
             assert_clean_common(&common);

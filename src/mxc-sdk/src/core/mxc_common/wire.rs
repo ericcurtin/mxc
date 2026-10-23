@@ -44,6 +44,8 @@ pub enum Containment {
     Seatbelt,
     /// Windows IsolationSession.
     IsolationSession,
+    /// Windows 365 Agents (experimental, state-aware).
+    W365Agents,
     /// Unprivileged Linux bubblewrap sandbox.
     Bubblewrap,
 }
@@ -61,6 +63,7 @@ impl Containment {
             "wslc" => Self::Wslc,
             "seatbelt" | "macos_sandbox" => Self::Seatbelt,
             "isolation_session" => Self::IsolationSession,
+            "w365_agents" => Self::W365Agents,
             "bubblewrap" => Self::Bubblewrap,
             _ => return None,
         })

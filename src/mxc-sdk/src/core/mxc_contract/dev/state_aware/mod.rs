@@ -75,6 +75,11 @@ pub use provision::{
     IsolationSessionProvisionRequest, StateAwareIsolationSession,
 };
 pub use provision::{ProvisionPhase, ProvisionRequest};
+pub use provision::{
+    StateAwareW365Agents, StateAwareW365AgentsDeprovision, StateAwareW365AgentsExec,
+    StateAwareW365AgentsStart, StateAwareW365AgentsStop, W365AgentsContainment, W365AgentsExec,
+    W365AgentsProvision, W365AgentsProvisionRequest, W365AgentsStart, W365AgentsStop,
+};
 pub use provision::{StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionRequest};
 pub use provision::{WindowsSandboxContainment, WindowsSandboxProvisionRequest};
 pub use provision_session::{

@@ -50,6 +50,14 @@ fn isolation_session_unavailable() -> MxcError {
     )
 }
 
+#[cfg(not(feature = "w365_agents"))]
+fn w365_agents_unavailable() -> MxcError {
+    MxcError::backend_unavailable(
+        "the W365 Agents backend is not available in this build (compiled without the \
+         `w365_agents` feature)",
+    )
+}
+
 fn phase_correlation(active: bool, phase: Phase, sandbox_id: Option<&str>) -> String {
     telemetry::correlation_state::pre_dispatch_vector(active, phase, sandbox_id)
 }
@@ -144,6 +152,18 @@ pub fn run_state_aware(
         crate::mxc_common::models::ContainmentBackend::IsolationSession => {
             Err(isolation_session_unavailable())
         }
+        #[cfg(feature = "w365_agents")]
+        crate::mxc_common::models::ContainmentBackend::W365Agents => {
+            let bound = crate::mxc_common::state_aware_binding::bind_w365_agents(parsed)?;
+            let mut runner = crate::w365agents_common::W365AgentsRunner::new();
+            crate::mxc_common::state_aware_dispatch::dispatch_state_aware(
+                &mut runner,
+                bound,
+                dry_run,
+            )
+        }
+        #[cfg(not(feature = "w365_agents"))]
+        crate::mxc_common::models::ContainmentBackend::W365Agents => Err(w365_agents_unavailable()),
         _ => run_state_aware_fallback(parsed, dry_run),
     }
 }
@@ -391,6 +411,20 @@ pub fn exec_state_aware(
         crate::mxc_common::models::ContainmentBackend::IsolationSession => {
             Err(isolation_session_unavailable())
         }
+        #[cfg(feature = "w365_agents")]
+        crate::mxc_common::models::ContainmentBackend::W365Agents => {
+            let bound = crate::mxc_common::state_aware_binding::bind_w365_agents(parsed)?;
+            let mut runner = crate::w365agents_common::W365AgentsRunner::new();
+            let handle = crate::mxc_common::state_aware_dispatch::dispatch_state_aware_exec(
+                &mut runner,
+                bound,
+            )?;
+            Ok(Box::new(
+                crate::mxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
+            ))
+        }
+        #[cfg(not(feature = "w365_agents"))]
+        crate::mxc_common::models::ContainmentBackend::W365Agents => Err(w365_agents_unavailable()),
         _ => Err(MxcError::unsupported_phase(format!(
             "backend {:?} does not implement the state-aware lifecycle",
             backend
@@ -424,6 +458,8 @@ pub fn exec_state_aware_pty(
         crate::mxc_common::models::ContainmentBackend::IsolationSession => {
             Err(isolation_session_unavailable())
         }
+        #[cfg(not(feature = "w365_agents"))]
+        crate::mxc_common::models::ContainmentBackend::W365Agents => Err(w365_agents_unavailable()),
         _ => Err(MxcError::unsupported_phase(format!(
             "backend {:?} does not support state-aware PTY exec",
             backend
@@ -1061,6 +1097,7 @@ mod tests {
     ) -> SdkStateAwareInput {
         let mut input = sdk_input(StateAwareOperation::Exec {
             sandbox_id: sandbox_id.to_string(),
+            w365_agents: None,
         });
         input.process = Some(SdkProcessInput {
             command_line: command_line.into(),
@@ -1117,13 +1154,22 @@ mod tests {
             let inputs = [
                 wslc_provision(None, None, telemetry_opt_in),
                 lifecycle_input("wslc:abc", telemetry_opt_in, |sandbox_id| {
-                    StateAwareOperation::Start { sandbox_id }
+                    StateAwareOperation::Start {
+                        sandbox_id,
+                        w365_agents: None,
+                    }
                 }),
                 lifecycle_input("wslc:abc", telemetry_opt_in, |sandbox_id| {
-                    StateAwareOperation::Stop { sandbox_id }
+                    StateAwareOperation::Stop {
+                        sandbox_id,
+                        w365_agents: None,
+                    }
                 }),
                 lifecycle_input("wslc:abc", telemetry_opt_in, |sandbox_id| {
-                    StateAwareOperation::Deprovision { sandbox_id }
+                    StateAwareOperation::Deprovision {
+                        sandbox_id,
+                        w365_agents: None,
+                    }
                 }),
                 exec_input("wslc:abc", "echo hello", telemetry_opt_in),
             ];
@@ -1247,18 +1293,23 @@ mod tests {
                 r#"{"version":"1.0.0","phase":"start","sandboxId":"iso:abc"}"#,
                 lifecycle_input("iso:abc", None, |sandbox_id| StateAwareOperation::Start {
                     sandbox_id,
+                    w365_agents: None,
                 }),
             ),
             (
                 r#"{"version":"1.0.0","phase":"stop","sandboxId":"iso:abc"}"#,
                 lifecycle_input("iso:abc", None, |sandbox_id| StateAwareOperation::Stop {
                     sandbox_id,
+                    w365_agents: None,
                 }),
             ),
             (
                 r#"{"version":"1.0.0","phase":"deprovision","sandboxId":"iso:abc"}"#,
                 lifecycle_input("iso:abc", None, |sandbox_id| {
-                    StateAwareOperation::Deprovision { sandbox_id }
+                    StateAwareOperation::Deprovision {
+                        sandbox_id,
+                        w365_agents: None,
+                    }
                 }),
             ),
         ] {
@@ -1890,7 +1941,7 @@ mod tests {
         );
     }
 
-    fn backend_cases() -> [(&'static str, &'static str, bool); 3] {
+    fn backend_cases() -> [(&'static str, &'static str, bool); 4] {
         [
             (
                 "windows_sandbox",
@@ -1907,12 +1958,17 @@ mod tests {
                 "wslc:00000000000000000000000000000000",
                 cfg!(all(target_os = "windows", feature = "wslc")),
             ),
+            (
+                "w365_agents",
+                "w365:6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9:9a1f2b3c-4d5e-6f70-8192-a3b4c5d6e7f8",
+                cfg!(feature = "w365_agents"),
+            ),
         ]
     }
 
     fn lifecycle_fixture(backend: &str, id: &str, phase: Phase) -> String {
         let mut value = serde_json::json!({
-            "version": if backend == "windows_sandbox" {
+            "version": if backend == "windows_sandbox" || backend == "w365_agents" {
                 "1.1.0-alpha"
             } else {
                 "0.9.0-alpha"
@@ -1925,6 +1981,12 @@ mod tests {
                 value["network"] = serde_json::json!({
                     "egress": {"default": "allow"},
                     "ingress": {"default": "allow", "hostLoopback": "allow"}
+                });
+            } else if backend == "w365_agents" {
+                value["w365Agents"] = serde_json::json!({
+                    "provision": {
+                        "poolId": "6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9"
+                    }
                 });
             }
         } else {
@@ -1949,7 +2011,7 @@ mod tests {
                 let json = lifecycle_fixture(backend, id, phase);
                 let parsed =
                     parse_state_aware(&json, false, &mut Logger::new(Mode::Buffer)).unwrap();
-                if backend == "windows_sandbox" {
+                if backend == "windows_sandbox" || backend == "w365_agents" {
                     let error = run_state_aware(parsed.clone(), true).unwrap_err();
                     assert_eq!(
                         error.code,
@@ -2053,9 +2115,9 @@ mod tests {
     }
 
     #[test]
-    fn windows_sandbox_refuses_streaming_after_typed_binding_without_running() {
+    fn relayed_only_backends_refuse_streaming_after_typed_binding_without_running() {
         for (backend, id, available) in backend_cases() {
-            if !available || backend != "windows_sandbox" {
+            if !available || (backend != "windows_sandbox" && backend != "w365_agents") {
                 continue;
             }
             let json = lifecycle_fixture(backend, id, Phase::Exec);

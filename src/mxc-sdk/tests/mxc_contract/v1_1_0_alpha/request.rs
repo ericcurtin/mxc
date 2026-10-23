@@ -167,6 +167,20 @@ fn provision_phase_with_wslc_containment_selects_wslc_provision_request() {
 }
 
 #[test]
+fn provision_phase_with_w365_agents_containment_selects_w365_agents_provision_request() {
+    let json = r#"{
+            "version": "1.1.0-alpha",
+            "phase": "provision",
+            "containment": "w365_agents"
+    }"#;
+
+    assert!(matches!(
+        parse_request(json).unwrap(),
+        Request::Provision(ProvisionRequest::W365Agents(_))
+    ));
+}
+
+#[test]
 fn invalid_provision_phase_isolation_session_root_returns_invalid_request() {
     let json = r#"{
             "version": "1.1.0-alpha",

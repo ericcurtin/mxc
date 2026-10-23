@@ -364,3 +364,103 @@ fn non_provision_phases_reject_backend_payloads_and_invalid_wrappers() {
         assert!(contract::parse_request(&json).is_err(), "{json}");
     }
 }
+
+#[test]
+fn w365_agents_provision_and_phase_adapters_preserve_presence_and_redact_tokens() {
+    let prov_json = r#"{
+        "version":"1.1.0-alpha",
+        "phase":"provision",
+        "containment":"w365_agents",
+        "w365Agents":{
+            "provision":{
+                "poolId":"6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9",
+                "cpBearerToken":"CP_PROVISION_SECRET",
+                "agentUserToken":"AGENT_USER_SECRET",
+                "userObjectId":"9a1f2b3c-4d5e-6f70-8192-a3b4c5d6e7f8"
+            }
+        }
+    }"#;
+    let contract_req = contract::parse_request(prov_json).expect("valid W365 provision request");
+    let contract_debug = format!("{contract_req:?}");
+    assert!(
+        !contract_debug.contains("CP_PROVISION_SECRET"),
+        "{contract_debug}"
+    );
+    assert!(
+        !contract_debug.contains("AGENT_USER_SECRET"),
+        "{contract_debug}"
+    );
+
+    let (common, operation) = adapt(prov_json);
+    assert_clean_common(&common);
+    let runtime_debug = format!("{operation:?}");
+    assert!(
+        !runtime_debug.contains("CP_PROVISION_SECRET"),
+        "{runtime_debug}"
+    );
+    assert!(
+        !runtime_debug.contains("AGENT_USER_SECRET"),
+        "{runtime_debug}"
+    );
+    let StateAwareOperation::Provision(StateAwareProvision::W365Agents(Some(cfg))) = operation
+    else {
+        panic!("expected W365Agents provision config");
+    };
+    assert_eq!(cfg.pool_id, "6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9");
+    assert_eq!(
+        cfg.cp_bearer_token.as_ref().map(|t| t.expose()),
+        Some("CP_PROVISION_SECRET")
+    );
+    assert_eq!(
+        cfg.agent_user_token.as_ref().map(|t| t.expose()),
+        Some("AGENT_USER_SECRET")
+    );
+
+    // Empty w365Agents wrapper on non-provision phases preserves Some(default) so
+    // non-W365 backends can reject it at binding time.
+    for (phase, extra) in [
+        ("start", ""),
+        ("exec", r#","process":{"commandLine":"echo"}"#),
+        ("stop", ""),
+        ("deprovision", ""),
+    ] {
+        let json = format!(
+            r#"{{"version":"1.1.0-alpha","phase":"{phase}","sandboxId":"w365:6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9:9a1f2b3c-4d5e-6f70-8192-a3b4c5d6e7f8"{extra},"w365Agents":{{}}}}"#
+        );
+        let (_, op) = adapt(&json);
+        match op {
+            StateAwareOperation::Start { w365_agents, .. } => assert!(w365_agents.is_some()),
+            StateAwareOperation::Exec { w365_agents, .. } => assert!(w365_agents.is_some()),
+            StateAwareOperation::Stop { w365_agents, .. } => assert!(w365_agents.is_some()),
+            StateAwareOperation::Deprovision { w365_agents, .. } => {
+                assert!(w365_agents.is_some())
+            }
+            other => panic!("unexpected operation: {other:?}"),
+        }
+    }
+
+    // Contract and runtime Debug must redact tokens on start, exec, stop, and deprovision too.
+    for (json, secret) in [
+        (
+            r#"{"version":"1.1.0-alpha","phase":"start","sandboxId":"w365:6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9:9a1f2b3c-4d5e-6f70-8192-a3b4c5d6e7f8","w365Agents":{"start":{"dpBearerToken":"DP_START_SECRET"}}}"#,
+            "DP_START_SECRET",
+        ),
+        (
+            r#"{"version":"1.1.0-alpha","phase":"exec","sandboxId":"w365:6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9:9a1f2b3c-4d5e-6f70-8192-a3b4c5d6e7f8","process":{"commandLine":"echo"},"w365Agents":{"exec":{"bearerToken":"DP_EXEC_SECRET"}}}"#,
+            "DP_EXEC_SECRET",
+        ),
+        (
+            r#"{"version":"1.1.0-alpha","phase":"stop","sandboxId":"w365:6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9:9a1f2b3c-4d5e-6f70-8192-a3b4c5d6e7f8","w365Agents":{"stop":{"cpBearerToken":"CP_STOP_SECRET"}}}"#,
+            "CP_STOP_SECRET",
+        ),
+        (
+            r#"{"version":"1.1.0-alpha","phase":"deprovision","sandboxId":"w365:6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9:9a1f2b3c-4d5e-6f70-8192-a3b4c5d6e7f8","w365Agents":{"deprovision":{"cpBearerToken":"CP_DEPROV_SECRET"}}}"#,
+            "CP_DEPROV_SECRET",
+        ),
+    ] {
+        let req = contract::parse_request(json).expect("valid W365 phase request");
+        assert!(!format!("{req:?}").contains(secret));
+        let (_, op) = adapt(json);
+        assert!(!format!("{op:?}").contains(secret));
+    }
+}

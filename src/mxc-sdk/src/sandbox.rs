@@ -66,7 +66,10 @@ pub fn validate_provision(
 /// Start an existing container.
 pub fn start(container_id: &ContainerId, options: StartOptions) -> Result<LifecycleResult, Error> {
     let input = lifecycle_sdk_input(container_id, options.telemetry, |sandbox_id| {
-        StateAwareOperation::Start { sandbox_id }
+        StateAwareOperation::Start {
+            sandbox_id,
+            w365_agents: None,
+        }
     })
     .map_err(Error::from)?;
     run_typed_state_aware(input, false)?
@@ -80,7 +83,10 @@ pub fn validate_start(
     options: StartOptions,
 ) -> Result<ValidationResult, Error> {
     let input = lifecycle_sdk_input(container_id, options.telemetry, |sandbox_id| {
-        StateAwareOperation::Start { sandbox_id }
+        StateAwareOperation::Start {
+            sandbox_id,
+            w365_agents: None,
+        }
     })
     .map_err(Error::from)?;
     run_typed_state_aware(input, true)?
@@ -91,7 +97,10 @@ pub fn validate_start(
 /// Stop an existing container.
 pub fn stop(container_id: &ContainerId, options: StopOptions) -> Result<LifecycleResult, Error> {
     let input = lifecycle_sdk_input(container_id, options.telemetry, |sandbox_id| {
-        StateAwareOperation::Stop { sandbox_id }
+        StateAwareOperation::Stop {
+            sandbox_id,
+            w365_agents: None,
+        }
     })
     .map_err(Error::from)?;
     run_typed_state_aware(input, false)?
@@ -105,7 +114,10 @@ pub fn validate_stop(
     options: StopOptions,
 ) -> Result<ValidationResult, Error> {
     let input = lifecycle_sdk_input(container_id, options.telemetry, |sandbox_id| {
-        StateAwareOperation::Stop { sandbox_id }
+        StateAwareOperation::Stop {
+            sandbox_id,
+            w365_agents: None,
+        }
     })
     .map_err(Error::from)?;
     run_typed_state_aware(input, true)?
@@ -119,7 +131,10 @@ pub fn deprovision(
     options: DeprovisionOptions,
 ) -> Result<LifecycleResult, Error> {
     let input = lifecycle_sdk_input(container_id, options.telemetry, |sandbox_id| {
-        StateAwareOperation::Deprovision { sandbox_id }
+        StateAwareOperation::Deprovision {
+            sandbox_id,
+            w365_agents: None,
+        }
     })
     .map_err(Error::from)?;
     run_typed_state_aware(input, false)?
@@ -133,7 +148,10 @@ pub fn validate_deprovision(
     options: DeprovisionOptions,
 ) -> Result<ValidationResult, Error> {
     let input = lifecycle_sdk_input(container_id, options.telemetry, |sandbox_id| {
-        StateAwareOperation::Deprovision { sandbox_id }
+        StateAwareOperation::Deprovision {
+            sandbox_id,
+            w365_agents: None,
+        }
     })
     .map_err(Error::from)?;
     run_typed_state_aware(input, true)?

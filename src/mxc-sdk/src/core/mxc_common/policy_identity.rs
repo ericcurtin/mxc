@@ -43,6 +43,7 @@
 //! | `dry_run` | Invocation mode, not policy. |
 //! | `experimental_enabled` | Authorizes selecting an experimental backend; it does not change the selected backend's enforcement. |
 //! | `source_contract` | External JSON provenance used only for diagnostics and telemetry. |
+//! | W365 tokens, `poolId`, `userObjectId`, endpoints, ports, timeouts | Bearer tokens are credentials; `poolId` and `userObjectId` are fleet/account targets; control/data-plane endpoints, ports, and timeouts are transport knobs. Only `userType` (on provision) and explicit `capability` (on exec) are hashed. |
 //!
 //! WSLC and Windows Sandbox configuration is hashed at the `wslc` and
 //! `windowsSandbox` root keys.
@@ -169,8 +170,29 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
         StateAwareOperation::Provision(
             StateAwareProvision::IsolationSession(None)
             | StateAwareProvision::WindowsSandbox
-            | StateAwareProvision::Wslc(None),
+            | StateAwareProvision::Wslc(None)
+            | StateAwareProvision::W365Agents(None),
         ) => Value::Null,
+        StateAwareOperation::Provision(StateAwareProvision::W365Agents(Some(
+            crate::mxc_common::models::W365ProvisionConfig {
+                pool_id: _excluded_pool_id,
+                agent_user_token: _excluded_agent_user_token,
+                user_object_id: _excluded_user_object_id,
+                user_type,
+                provision_timeout_ms: _excluded_provision_timeout_ms,
+                cp_base_url: _excluded_cp_base_url,
+                cp_bearer_token: _excluded_cp_bearer_token,
+                cp_api_version: _excluded_cp_api_version,
+                port: _excluded_port,
+            },
+        ))) => match user_type {
+            Some(user_type) => {
+                let mut config = Map::new();
+                config.insert("userType".into(), Value::String(user_type.clone()));
+                Value::Object(config)
+            }
+            None => Value::Null,
+        },
 
         StateAwareOperation::ProvisionSession(Some(WslcProvisionSessionConfig {
             cpu_count,
@@ -192,19 +214,62 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
         StateAwareOperation::ProvisionSession(None) => Value::Null,
 
         // Sandbox and session IDs are not policy and can contain account
-        // identities.
+        // identities. W365 phase configs carry endpoints and credentials, which
+        // are excluded; only an explicit exec capability affects behavior.
         StateAwareOperation::Start {
             sandbox_id: _excluded_sandbox_id,
+            w365_agents,
+        } => {
+            if let Some(crate::mxc_common::models::W365StartConfig {
+                ready_timeout_ms: _excluded_ready_timeout_ms,
+                poll_interval_ms: _excluded_poll_interval_ms,
+                dp_suffix: _excluded_dp_suffix,
+                dp_bearer_token: _excluded_dp_bearer_token,
+                dp_api_version: _excluded_dp_api_version,
+                port: _excluded_port,
+            }) = w365_agents
+            {}
+            Value::Null
         }
-        | StateAwareOperation::Exec {
+        StateAwareOperation::Exec {
             sandbox_id: _excluded_sandbox_id,
-        }
-        | StateAwareOperation::Stop {
+            w365_agents,
+        } => match w365_agents {
+            Some(crate::mxc_common::models::W365ExecConfig {
+                dp_suffix: _excluded_dp_suffix,
+                capability: Some(capability),
+                bearer_token: _excluded_token,
+                port: _excluded_port,
+            }) => {
+                let mut config = Map::new();
+                config.insert("capability".into(), Value::String(capability.clone()));
+                Value::Object(config)
+            }
+            Some(crate::mxc_common::models::W365ExecConfig {
+                dp_suffix: _excluded_dp_suffix,
+                capability: None,
+                bearer_token: _excluded_token,
+                port: _excluded_port,
+            }) => Value::Null,
+            None => Value::Null,
+        },
+        StateAwareOperation::Stop {
             sandbox_id: _excluded_sandbox_id,
+            w365_agents,
         }
         | StateAwareOperation::Deprovision {
             sandbox_id: _excluded_sandbox_id,
-        } => Value::Null,
+            w365_agents,
+        } => {
+            if let Some(crate::mxc_common::models::W365StopConfig {
+                cp_base_url: _excluded_cp_base_url,
+                cp_bearer_token: _excluded_cp_bearer_token,
+                cp_api_version: _excluded_cp_api_version,
+                port: _excluded_port,
+            }) = w365_agents
+            {}
+            Value::Null
+        }
         StateAwareOperation::DeprovisionSession {
             session_id: _excluded_session_id,
         } => Value::Null,
@@ -1248,24 +1313,28 @@ mod tests {
             (
                 StateAwareOperation::Start {
                     sandbox_id: "wslc:deadbeef".into(),
+                    w365_agents: None,
                 },
                 "start",
             ),
             (
                 StateAwareOperation::Exec {
                     sandbox_id: "wslc:deadbeef".into(),
+                    w365_agents: None,
                 },
                 "exec",
             ),
             (
                 StateAwareOperation::Stop {
                     sandbox_id: "wslc:deadbeef".into(),
+                    w365_agents: None,
                 },
                 "stop",
             ),
             (
                 StateAwareOperation::Deprovision {
                     sandbox_id: "wslc:deadbeef".into(),
+                    w365_agents: None,
                 },
                 "deprovision",
             ),
@@ -1368,5 +1437,165 @@ mod tests {
             state_aware_policy_hash(changed.request(), "wslc", changed.operation()),
             "command, env, telemetry, comments, dry-run and unverified IDs are excluded"
         );
+    }
+
+    #[test]
+    fn w365_agents_policy_hash_excludes_secrets_and_endpoints_but_hashes_user_type_and_capability()
+    {
+        let prov_a = parse_state_aware(
+            r#"{
+                "version":"1.1.0-alpha",
+                "phase":"provision",
+                "containment":"w365_agents",
+                "w365Agents":{
+                    "provision":{
+                        "poolId":"6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9",
+                        "cpBearerToken":"tok-secret-a",
+                        "agentUserToken":"tok-agent-a",
+                        "userObjectId":"9a1f2b3c-4d5e-6f70-8192-a3b4c5d6e7f8",
+                        "cpBaseUrl":"https://cp-a.example.internal",
+                        "cpApiVersion":"2026-06-01-preview",
+                        "provisionTimeoutMs":30000,
+                        "port":443
+                    }
+                }
+            }"#,
+        );
+        let prov_b = parse_state_aware(
+            r#"{
+                "version":"1.1.0-alpha",
+                "phase":"provision",
+                "containment":"w365_agents",
+                "w365Agents":{
+                    "provision":{
+                        "poolId":"11111111-2222-3333-4444-555555555555",
+                        "cpBearerToken":"tok-secret-b",
+                        "agentUserToken":"tok-agent-b",
+                        "userObjectId":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                        "cpBaseUrl":"https://cp-b.example.internal",
+                        "cpApiVersion":"2027-01-01",
+                        "provisionTimeoutMs":60000,
+                        "port":8443
+                    }
+                }
+            }"#,
+        );
+        assert_eq!(
+            state_aware_policy_hash(prov_a.request(), "w365_agents", prov_a.operation()),
+            state_aware_policy_hash(prov_b.request(), "w365_agents", prov_b.operation()),
+            "W365 tokens, pool/user IDs, endpoints, ports, and timeouts must not change the policy hash"
+        );
+
+        let prov_agentic = parse_state_aware(
+            r#"{
+                "version":"1.1.0-alpha",
+                "phase":"provision",
+                "containment":"w365_agents",
+                "w365Agents":{
+                    "provision":{
+                        "poolId":"6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9",
+                        "userType":"Agentic"
+                    }
+                }
+            }"#,
+        );
+        assert_ne!(
+            state_aware_policy_hash(prov_a.request(), "w365_agents", prov_a.operation()),
+            state_aware_policy_hash(
+                prov_agentic.request(),
+                "w365_agents",
+                prov_agentic.operation()
+            ),
+            "W365 userType changes session isolation kind and must affect the policy hash"
+        );
+
+        let exec_a = parse_state_aware(
+            r#"{
+                "version":"1.1.0-alpha",
+                "phase":"exec",
+                "sandboxId":"w365:6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9:9a1f2b3c-4d5e-6f70-8192-a3b4c5d6e7f8",
+                "process":{"commandLine":"echo a"},
+                "w365Agents":{
+                    "exec":{
+                        "bearerToken":"dp-secret-a",
+                        "dpSuffix":"westus3.ari.example.internal",
+                        "port":443
+                    }
+                }
+            }"#,
+        );
+        let exec_b = parse_state_aware(
+            r#"{
+                "version":"1.1.0-alpha",
+                "phase":"exec",
+                "sandboxId":"w365:11111111-2222-3333-4444-555555555555:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                "process":{"commandLine":"echo b"},
+                "w365Agents":{
+                    "exec":{
+                        "bearerToken":"dp-secret-b",
+                        "dpSuffix":"eastus2.ari.example.internal",
+                        "port":8443
+                    }
+                }
+            }"#,
+        );
+        assert_eq!(
+            state_aware_policy_hash(exec_a.request(), "w365_agents", exec_a.operation()),
+            state_aware_policy_hash(exec_b.request(), "w365_agents", exec_b.operation()),
+            "W365 exec bearerToken, dpSuffix, port, and sandboxId must not change the policy hash"
+        );
+
+        let exec_custom_cap = parse_state_aware(
+            r#"{
+                "version":"1.1.0-alpha",
+                "phase":"exec",
+                "sandboxId":"w365:6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9:9a1f2b3c-4d5e-6f70-8192-a3b4c5d6e7f8",
+                "process":{"commandLine":"echo a"},
+                "w365Agents":{
+                    "exec":{
+                        "capability":"contoso.custom-exec"
+                    }
+                }
+            }"#,
+        );
+        assert_ne!(
+            state_aware_policy_hash(exec_a.request(), "w365_agents", exec_a.operation()),
+            state_aware_policy_hash(
+                exec_custom_cap.request(),
+                "w365_agents",
+                exec_custom_cap.operation()
+            ),
+            "an explicit W365 exec capability must affect the policy hash"
+        );
+
+        for (phase, block_a, block_b) in [
+            (
+                "start",
+                r#""start":{"dpBearerToken":"tok-a","dpSuffix":"a.internal","port":443,"readyTimeoutMs":1000}"#,
+                r#""start":{"dpBearerToken":"tok-b","dpSuffix":"b.internal","port":8443,"readyTimeoutMs":2000}"#,
+            ),
+            (
+                "stop",
+                r#""stop":{"cpBearerToken":"tok-a","cpBaseUrl":"https://a.internal","port":443}"#,
+                r#""stop":{"cpBearerToken":"tok-b","cpBaseUrl":"https://b.internal","port":8443}"#,
+            ),
+            (
+                "deprovision",
+                r#""deprovision":{"cpBearerToken":"tok-a","cpBaseUrl":"https://a.internal","port":443}"#,
+                r#""deprovision":{"cpBearerToken":"tok-b","cpBaseUrl":"https://b.internal","port":8443}"#,
+            ),
+        ] {
+            let req_a = parse_state_aware(&format!(
+                r#"{{"version":"1.1.0-alpha","phase":"{phase}","sandboxId":"w365:6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9:9a1f2b3c-4d5e-6f70-8192-a3b4c5d6e7f8","w365Agents":{{{block_a}}}}}"#
+            ));
+            let req_b = parse_state_aware(&format!(
+                r#"{{"version":"1.1.0-alpha","phase":"{phase}","sandboxId":"w365:11111111-2222-3333-4444-555555555555:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","w365Agents":{{{block_b}}}}}"#
+            ));
+            assert_eq!(
+                state_aware_policy_hash(req_a.request(), "w365_agents", req_a.operation()),
+                state_aware_policy_hash(req_b.request(), "w365_agents", req_b.operation()),
+                "W365 {phase} credentials, endpoints, ports, and timeouts must not change the policy hash"
+            );
+        }
     }
 }
