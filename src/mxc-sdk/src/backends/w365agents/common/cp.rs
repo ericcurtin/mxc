@@ -135,8 +135,7 @@ pub fn checkout_request(client: &SmClient, opts: &CheckoutOptions) -> HttpReques
     }
 }
 
-/// Map a checkout response to a session or a typed error (pure). Every row here
-/// is a row of spec §7's control-plane table.
+/// Map a checkout response to a session or a typed error (pure).
 ///
 /// # Errors
 /// Returns `backend_error` for a `404` (`pool_not_found`), `401`/`403`
@@ -168,7 +167,7 @@ pub fn map_checkout_response(resp: &HttpResponse) -> Result<SessionResponseV1, M
         }
         // The server caps checkout at 30 s and surfaces the overrun as a 500.
         // The checkout may still have succeeded, so this is explicitly NOT
-        // retryable — a retry strands the prior checkout (spec §4.1).
+        // retryable — a retry strands the prior checkout.
         500 => {
             return Err(MxcError::backend_error(
                 "checkout failed: provision_timeout (the checkout may have succeeded)",

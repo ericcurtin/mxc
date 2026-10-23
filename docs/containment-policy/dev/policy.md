@@ -165,10 +165,10 @@ development contract.
 ## Container lifecycle operations
 
 Set `phase` to `provision`, `start`, `exec`, `stop`, or `deprovision`. These
-operations exist for **IsolationSession, WSLc, and Windows Sandbox** in this
-contract. `provision` requires a concrete `containment` and must omit
+operations exist for **IsolationSession, WSLc, Windows Sandbox, and W365 Agents**
+in this contract. `provision` requires a concrete `containment` and must omit
 `sandboxId`; subsequent phases require the ID returned by provision
-(`iso:...`, `wslc:...`, or `wsb:...`) and infer the backend from its prefix.
+(`iso:...`, `wslc:...`, `wsb:...`, or `w365:...`) and infer the backend from its prefix.
 WSLc also supports `provision-session` and `deprovision-session`, which require
 `containment: "wslc"` and carry no `sandboxId`. Every phase requires `version`;
 all admit optional `$schema`, `_comment`, and `telemetry.enabled`.
@@ -179,8 +179,9 @@ all admit optional `$schema`, `_comment`, and `telemetry.enabled`.
 | `provision-session` / `wslc` | Optional `wslc.provisionSession.cpuCount`, `memoryMb`, and `gpu`; no process, filesystem, network, or UI policy. |
 | `provision` / `wslc` | Optional `filesystem`, `network`, and `wslc.provision.image`, `imageTarPath`, `portMappings`, or `sessionId`. Port mappings require all-allow bridged networking; CPU/memory/GPU sizing belongs to the session, not the sandbox. No storage-path override. |
 | `provision` / `windows_sandbox` | Optional `filesystem` only. No network, UI, proxy, or backend-specific settings; provision stores the immutable filesystem policy. Requires experimental authorization. |
-| `start`, `stop`, `deprovision` | Required `sandboxId`; no process or policy sections. |
-| `exec` | Required `sandboxId` and `process` (non-empty `commandLine`); optional `network` and `runtimeConfig` in the JSON shape. All three backends reject supplied network policy at exec and inherit their provision posture. IsolationSession and Windows Sandbox reject a proxy; WSLc accepts an exec proxy. |
+| `provision` / `w365_agents` | Optional `w365Agents.provision` (`poolId` required when `provision` is present; optional `userType`, `userObjectId`, `agentUserToken`, `provisionTimeoutMs`, `cpBaseUrl`, `cpBearerToken`, `cpApiVersion`, and `port`). No filesystem, network, UI, or proxy. Requires experimental authorization and the `w365_agents` build feature. |
+| `start`, `stop`, `deprovision` | Required `sandboxId`; optional `w365Agents.{start,stop,deprovision}` (accepted only for `w365:` IDs and rejected by other backends); no process or policy sections. |
+| `exec` | Required `sandboxId` and `process` (non-empty `commandLine`); optional `network`, `runtimeConfig`, and `w365Agents.exec` (accepted only for `w365:` IDs) in the JSON shape. All four backends reject supplied network policy at exec. IsolationSession, Windows Sandbox, and W365 Agents reject a proxy; WSLc accepts an exec proxy. |
 | `deprovision-session` / `wslc` | Required `sessionId`; no process, filesystem, network, UI, or backend configuration. |
 
 ### WSLc sessions
@@ -290,6 +291,26 @@ For Windows Sandbox, a complete provision request is:
 ```
 
 The mapped `C:\data` directory must already exist on the host.
+
+For W365 Agents, a complete provision request is:
+
+```json
+{
+  "version": "1.1.0-alpha",
+  "phase": "provision",
+  "containment": "w365_agents",
+  "w365Agents": {
+    "provision": {
+      "poolId": "6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9",
+      "userType": "Local"
+    }
+  }
+}
+```
+
+See the [W365 Agents lifecycle guide](../../backends/w365-agents/w365-agents.md)
+for `w365Agents.{provision,start,exec,stop,deprovision}` fields and `W365A_*`
+ambient environment variables.
 
 An `exec` request after provision and start looks like this (replace the ID
 with the returned one):

@@ -17,8 +17,7 @@ use crate::w365agents_common::secret::Redacted;
 /// Default client-side checkout timeout, in milliseconds.
 ///
 /// Deliberately above SessionManagement's 30 s checkout cap: a shorter client
-/// deadline would abandon an in-flight checkout and orphan a billing VM
-/// (spec §4.1, §8).
+/// deadline would abandon an in-flight checkout and orphan a billing VM.
 const DEFAULT_PROVISION_TIMEOUT_MS: u64 = 45_000;
 
 /// Default budget, in milliseconds, for a device to reach `Ready` during start.

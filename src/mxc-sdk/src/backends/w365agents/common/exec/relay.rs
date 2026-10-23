@@ -16,8 +16,7 @@ use crate::w365agents_common::exec::frame::{
 use crate::w365agents_common::exec::payload::{parse_error, parse_exit, ExecStartPayload};
 
 /// Exit code reported by `waiter` when the workload ends abnormally (device
-/// `ERROR` frame, or a transport drop before `EXIT`). Matches the spec's
-/// `EXIT{sentinel}` convention (§7).
+/// `ERROR` frame, or a transport drop before `EXIT`).
 pub const SENTINEL_ABNORMAL_EXIT: i32 = -1;
 
 /// Largest stdin chunk sent in a single `STDIN` frame (respects the 64 KiB cap).
@@ -39,7 +38,7 @@ pub enum StdinMsg {
 /// relays frames: `STDOUT`/`STDERR` → `out`/`err`, queued stdin → `STDIN`
 /// frames, terminal `EXIT`/`ERROR` → return.
 ///
-/// **Post-`101` contract (spec §7):** the workload commit point is the `101`
+/// **Post-`101` contract:** the workload commit point is the `101`
 /// upgrade (performed in the transport before this runs), so **every duplex
 /// I/O failure resolves to `Ok(SENTINEL_ABNORMAL_EXIT)`, never a wire `Err`**.
 /// A stdin-write failure does NOT abort — it only stops further stdin (the peer
@@ -55,7 +54,7 @@ pub fn relay_exec<S: Read + Write>(
 ) -> Result<i32, MxcError> {
     // First duplex write. `encode()` faults are local (`Err`); a *send* failure
     // is already post-`101`, so it is an abnormal close (sentinel), not a wire error.
-    // `encode()` already returns a COMPLETE §6 frame — write it RAW. Do NOT pass it
+    // `encode()` already returns a COMPLETE frame — write it RAW. Do NOT pass it
     // through `write_frame` (that would double-wrap EXEC_START: `[0x01][len][0x01…]`).
     let start_frame = start.encode()?;
     if stream
@@ -271,7 +270,7 @@ mod tests {
         let (_c, _o, _e, outbound) = run(inbound, vec![]);
         // The first outbound frame must be a SINGLE EXEC_START whose payload is the
         // raw JSON — regression guard against double-framing (`[0x01][len][0x01…]`,
-        // which a real §6 server rejects as "invalid start of a value").
+        // which a real DesktopControl.Exec server rejects as "invalid start of a value").
         let mut acc = super::super::frame::FrameAccumulator::new();
         acc.extend(&outbound);
         let frame = acc.next_frame().unwrap().expect("an EXEC_START frame");
@@ -400,7 +399,7 @@ mod tests {
     #[test]
     fn read_error_returns_sentinel_not_wire_error() {
         // A peer-gone read error (e.g. ConnectionReset) after EXEC_START must
-        // resolve to Ok(sentinel), never a wire Err (spec §7, post-101).
+        // resolve to Ok(sentinel), never a wire Err (post-101 contract).
         let mut dup = FlakyDuplex {
             inbound: Cursor::new(Vec::new()),
             writes_before_fail: 100,

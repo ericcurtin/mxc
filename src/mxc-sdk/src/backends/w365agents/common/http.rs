@@ -34,8 +34,6 @@ pub struct HttpRequest {
     pub body: Option<String>,
 }
 
-// Manual Debug: the bearer token must never reach a log line or an error
-// `details` object (spec §8).
 /// Header names whose values are credentials and must never be printed.
 /// Matched case-insensitively as substrings, so `x-ms-authorization-auxiliary`
 /// is covered by `authorization`.
@@ -50,7 +48,7 @@ fn is_sensitive_header(name: &str) -> bool {
 }
 
 // Manual Debug: the bearer token must never reach a log line or an error
-// `details` object (spec §8). Header VALUES are redacted by name as well —
+// `details` object. Header VALUES are redacted by name as well —
 // the agentic checkout carries a second credential in the
 // `x-ms-authorization-auxiliary` header, which is just as sensitive as the
 // bearer token and would otherwise print verbatim.
@@ -80,7 +78,7 @@ impl std::fmt::Debug for HttpRequest {
 }
 
 /// One inbound response. `request_id` carries the service's `x-ms-request-id`
-/// into error `details` for cross-service diagnosis (spec §8).
+/// into error `details` for cross-service diagnosis.
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
     pub status: u16,
@@ -173,8 +171,8 @@ pub fn build_request(req: &HttpRequest) -> Result<String, MxcError> {
 /// Sending it lets an operator pivot from a failed phase to the matching SM or
 /// ARI request. Caveat: ARI records the value as an `Activity` tag only *after*
 /// authorization, so 401/403 responses are NOT tagged on ARI's side and
-/// correlate solely through the `x-ms-request-id` this crate already captures in
-/// each error's `details` (spec §8).
+/// correlate solely through the `x-ms-request-id` captured in each error's
+/// `details`.
 pub(crate) fn correlation_header() -> Option<(String, String)> {
     correlation_header_from(&crate::mxc_common::telemetry::current_correlation_vector())
 }
@@ -445,8 +443,8 @@ mod tests {
     #[test]
     fn debug_redacts_the_bearer_token_and_credential_headers() {
         // The agentic checkout carries a SECOND credential in a header, so
-        // redacting only `bearer_token` is not enough (spec §8: no token in a
-        // sandbox id, a log line, or an error `details` object).
+        // redacting only `bearer_token` is not enough: no token may appear in
+        // a sandbox id, a log line, or an error `details` object.
         let mut r = req();
         r.bearer_token = Redacted::new("BEARER_SECRET");
         r.headers = vec![

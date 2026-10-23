@@ -2,13 +2,13 @@
 // Licensed under the MIT License.
 
 //! Real end-to-end interop test: the **actual** DesktopControl.Exec host binary
-//! (Plan A, C#) driven by the **actual** MXC client transport + relay (Plan B,
-//! Rust) over the real §6 wire protocol — running real commands.
+//! (C#) driven by the **actual** MXC client transport + relay (Rust)
+//! over the binary frame wire protocol — running real commands.
 //!
 //! This exercises the direct loopback path (client ⇄ DC.Exec host on
 //! `127.0.0.1:{port}`), which is the production app-layer contract; the
 //! RemotingInterface relay in between is an opaque byte carrier (reused
-//! unchanged) and is not required to validate §6 interop.
+//! unchanged) and is not required to validate frame-protocol interop.
 //!
 //! **Opt-in:** set `DC_EXEC_EXE` to the path of `DesktopControl.Exec.exe`.
 //! Without it the test prints a SKIP notice and passes, so normal `cargo test`
@@ -63,7 +63,7 @@ fn wait_for_listen(port: u16) {
 }
 
 /// Drive ONE exec over a fresh connection using the real client helpers:
-/// TCP → §6 HTTP/1.1 upgrade (101) → `EXEC_START` → relay → `EXIT`.
+/// TCP → HTTP/1.1 upgrade (101) → `EXEC_START` → relay → `EXIT`.
 /// Returns `(exit_code, stdout, stderr)`.
 fn run_one(port: u16, command: &str, stdin: &[u8]) -> (i32, String, String) {
     let mut sock = TcpStream::connect(("127.0.0.1", port)).expect("connect to DC.Exec");

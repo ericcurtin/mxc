@@ -3,18 +3,17 @@
 
 //! `W365AgentsRunner` — the `StatefulSandboxBackend` implementation.
 //!
-//! Lifecycle mapping (see the design spec, §4):
+//! Lifecycle mapping:
 //!   provision   → SM  POST   /api/pools/{poolId}/sessions   (checkout; mints the id)
 //!   start       → ARI GET    /computers/{c}/status          (poll to Ready)
-//!   exec        → ARI ANY    /computers/{c}/microsoft.mxc-exec
+//!   exec        → ARI GET    /computers/{c}/microsoft.mxc-exec
 //!   stop        → SM  DELETE /api/sessions/{c}               (check-in; TERMINAL)
 //!   deprovision → SM  DELETE /api/sessions/{c}               (idempotent safety net)
 //!
 //! Every phase routes its id through the single [`W365SandboxId`] parser, so a
 //! `w365:{poolId}:{computerId}` minted by `provision` round-trips into the very
-//! next `exec` / `stop` / `deprovision`. The legacy dot form
-//! (`w365:{poolId}.{sessionId}`) is no longer parsed here and now fails as
-//! `malformed_id` (spec §10 — a hard cutover, no dual parser).
+//! next `exec` / `stop` / `deprovision`. The two-segment dot form
+//! (`w365:{poolId}.{sessionId}`) is unsupported and fails as `malformed_id`.
 
 use std::time::Duration;
 

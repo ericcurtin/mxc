@@ -50,6 +50,7 @@ binary targets of the same publishable package under `src/mxc-sdk/src/bin/`:
 | Windows Sandbox | SDK common/lifecycle modules plus `src/mxc-sdk/src/bin/windows_sandbox_{daemon,guest}/` |
 | WSLC | `src/mxc-sdk/src/backends/wslc/common/` plus `src/mxc-sdk/src/bin/wslc_daemon/` |
 | IsolationSession | SDK bindings and runtime modules under `backends/isolation_session/` |
+| W365 Agents | `src/mxc-sdk/src/backends/w365agents/common/` |
 | NanVix | SDK common, runner, binary-staging, and build modules under `backends/nanvix/` |
 | Windows Learning Mode | `src/mxc-sdk/src/core/learning_mode_windows/` over the shared core module |
 

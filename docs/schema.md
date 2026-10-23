@@ -486,6 +486,7 @@ force a particular backend.
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
 | `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
 | `"isolation_session"` | Windows isolation session: create-and-run execution uses a freshly provisioned isolated user account in its own OS-managed session. Container lifecycle operations can retain the session between executions. |
+| `"w365_agents"` | Remote Windows 365 Cloud PC container lifecycle operations via SessionManagement and RemotingInterface (`DesktopControl.Exec`). Lifecycle-only (rejects create-and-run execution); requires development contract `1.1.0-alpha`, `--experimental`, and the `w365_agents` build feature — see [`docs/backends/w365-agents/w365-agents.md`](backends/w365-agents/w365-agents.md). |
 | `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/backends/seatbelt/seatbelt-backend.md`](backends/seatbelt/seatbelt-backend.md). |
 | `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces. The Linux default — see [`docs/backends/bwrap/bubblewrap-backend.md`](backends/bwrap/bubblewrap-backend.md). |
 
@@ -510,7 +511,7 @@ Choose a supported contract version for the backend and operation:
 - IsolationSession uses published `0.9.0-alpha`.
 - WSLC uses published `0.9.0-alpha`, or development `1.1.0-alpha` for
   `wslc.provision.portMappings` and the session operations; Windows Sandbox
-  uses development `1.1.0-alpha`.
+  and W365 Agents use development `1.1.0-alpha`.
 
 Contracts before `0.9.0-alpha` are retired. The supported published
 `0.9.0-alpha` and `1.0.0` contracts describe create-and-run JSON requests plus
@@ -551,8 +552,35 @@ containment instead of being routed by their target. Any containment other than
 session that sandboxes are placed into.
 
 Backends supporting container lifecycle operations today are `isolation_session`, `windows_sandbox`,
-and `wslc` (all Windows-only). IsolationSession does not require runtime
-experimental authorization; Windows Sandbox does.
+`wslc`, and `w365_agents`. IsolationSession and WSLC do not require runtime
+experimental authorization; Windows Sandbox and W365 Agents do.
+
+#### W365 Agents lifecycle operations
+
+`w365_agents` checks out a pre-provisioned Cloud PC from a Windows 365 pool and
+returns a `w365:<pool-guid>:<computer-guid>` sandbox ID:
+
+```json
+{
+    "$schema": "./schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "phase": "provision",
+    "containment": "w365_agents",
+    "w365Agents": {
+        "provision": {
+            "poolId": "6f3a91c2-1d4e-4b0a-9c77-2f5e8a10b3d9",
+            "userType": "Local"
+        }
+    }
+}
+```
+
+Later phases (`start`, `exec`, `stop`, and `deprovision`) route by the `w365:`
+prefix on `sandboxId` and accept optional per-phase overrides under
+`w365Agents.{start,exec,stop,deprovision}` (or resolve service coordinates from
+`W365A_*` environment variables). Cross-cutting `filesystem`, `network`, and
+`ui` sections are rejected because the workload runs on a remote Cloud PC. See
+the [W365 Agents lifecycle guide](backends/w365-agents/w365-agents.md).
 
 WSLC `provision` accepts `wslc.provision.portMappings`, the same
 `windowsPort` / `containerPort` / `protocol` entries as the create-and-run

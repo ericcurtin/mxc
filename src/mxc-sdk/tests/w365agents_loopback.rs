@@ -69,7 +69,7 @@ fn connect_and_upgrade(addr: std::net::SocketAddr) -> TcpStream {
 /// performs a graceful FIN rather than an abortive RST. On Windows, dropping a
 /// socket that still holds the client's unread `EXEC_START`/`STDIN_CLOSE` bytes
 /// triggers an RST (RFC 1122 §4.2.2.13) that discards the `EXIT` frame we just
-/// sent, which the relay then (correctly, per spec §7) surfaces as the
+/// sent, which the relay then surfaces as the
 /// abnormal-exit sentinel — masking the real exit code under test.
 fn drain_until_client_closes(sock: &mut TcpStream) {
     let mut sink = [0u8; 256];

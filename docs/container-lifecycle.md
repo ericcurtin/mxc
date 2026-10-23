@@ -87,3 +87,4 @@ author typed SDK requests.
 - [Node SDK](../sdk/node/README.md)
 - [IsolationSession TypeScript architecture](development/architecture/backends/isolation-session/state-aware-typescript.md)
 - [WSLC lifecycle guide](backends/wslc/wslc-state-aware.md)
+- [W365 Agents lifecycle guide](backends/w365-agents/w365-agents.md)

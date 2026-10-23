@@ -122,7 +122,7 @@ impl W365SandboxId {
     }
 
     /// Pool-scoped DataPlane host. The host is never stored in the id — it is
-    /// rebuilt from ambient config every time (spec §3).
+    /// rebuilt from ambient config every time.
     pub fn dp_host(&self, dp_suffix: &str) -> String {
         format!("{}.{}", self.pool_id, dp_suffix)
     }
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn rejects_the_legacy_dot_form() {
-        // The old 2-segment form is deliberately unsupported (spec §10).
+        // The two-segment dot form is unsupported.
         let err = W365SandboxId::parse(&format!("w365:{POOL}.{COMPUTER}")).unwrap_err();
         assert_eq!(err.code.as_str(), "malformed_id");
     }

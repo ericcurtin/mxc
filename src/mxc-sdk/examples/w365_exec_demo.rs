@@ -162,7 +162,7 @@ fn parse_args() -> Args {
     }
 }
 
-/// Connect (TLS or plaintext), run the §6 relay to completion writing the
+/// Connect (TLS or plaintext), run the relay to completion writing the
 /// remote stdout/stderr to `out`/`err`, and return the remote exit code.
 fn run(args: &Args, target: UpgradeTarget, start: ExecStartPayload) -> Result<i32, MxcError> {
     let mut out = stdout().lock();

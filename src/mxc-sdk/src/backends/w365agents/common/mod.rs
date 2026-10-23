@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! MXC `w365_agents` backend — streaming exec bridge to the DesktopControl.Exec
-//! capability over the RemotingInterface relay. See
-//! `docs/superpowers/specs/2026-07-20-mxc-relay-exec-design.md`.
+//! MXC `w365_agents` backend — container lifecycle operations and streaming exec
+//! bridge to `DesktopControl.Exec` over the RemotingInterface relay. See
+//! `docs/backends/w365-agents/w365-agents.md`.
 
 pub mod config;
 pub mod cp;

@@ -11,9 +11,9 @@ use crate::mxc_common::mxc_error::MxcError;
 
 use crate::w365agents_common::exec::frame::{encode_frame, FrameType, MAX_FRAME_PAYLOAD};
 
-/// In-memory `EXEC_START`. Rust field names are descriptive; the WIRE form
-/// (spec §6, matching the DesktopControl.Exec server / Plan A) is
-/// `{command, cwd?, env?, timeoutMs?, shell?, mode:"pipe"}` with `env` a JSON
+/// In-memory `EXEC_START`. Rust field names are descriptive; the wire form
+/// (matching the `DesktopControl.Exec` guest host) is
+/// `{command, cwd?, env?, timeoutMs, shell?, mode:"pipe"}` with `env` a JSON
 /// object `{KEY:VALUE}`. Sensitive fields (`command_line`, `env`) are never
 /// logged — see the custom `Debug`.
 #[derive(Clone)]
@@ -39,9 +39,9 @@ impl std::fmt::Debug for ExecStartPayload {
 }
 
 impl ExecStartPayload {
-    /// Serialize to a spec-§6 `EXEC_START` frame: descriptive Rust fields are
+    /// Serialize to an `EXEC_START` frame: descriptive Rust fields are
     /// mapped to the wire keys, `env` "KEY=VALUE" entries become a JSON object,
-    /// and `mode` is always `"pipe"` (PTY deferred). Fails if the JSON body
+    /// and `mode` is always `"pipe"`. Fails if the JSON body
     /// exceeds the 64 KiB frame cap (no silent truncation).
     pub fn encode(&self) -> Result<Vec<u8>, MxcError> {
         // "KEY=VALUE" -> {KEY: VALUE}; split on the FIRST '=' (values may contain '=').
@@ -93,7 +93,7 @@ impl ExecStartPayload {
     }
 }
 
-/// JSON body of the terminal `EXIT` frame (spec §6: `{code:i32}`).
+/// JSON body of the terminal `EXIT` frame (`{"code": i32}`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ExitPayload {
     /// Wire key is `code`; kept as `exit_code` in Rust for readability.
@@ -101,7 +101,7 @@ pub struct ExitPayload {
     pub exit_code: i32,
 }
 
-/// JSON body of the terminal `ERROR` frame (spec §6: `{code?, message}`). Only
+/// JSON body of the terminal `ERROR` frame (`{"code"?: string, "message": string}`). Only
 /// `message` is consumed; the server's `code` (a string category) is ignored —
 /// the field is intentionally omitted, and serde skips unknown fields.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -141,7 +141,7 @@ mod tests {
         let len = u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
         assert_eq!(len, frame.len() - 5);
         let json: serde_json::Value = serde_json::from_slice(&frame[5..]).unwrap();
-        // Spec §6 wire keys — MUST match the DesktopControl.Exec server (Plan A).
+        // Wire keys — MUST match the DesktopControl.Exec guest host.
         assert_eq!(json["command"], "echo hi");
         assert_eq!(json["cwd"], "C:\\work");
         assert_eq!(json["env"]["SECRET"], "hunter2"); // env is a JSON object {KEY:VALUE}

@@ -5,11 +5,11 @@
 
 use crate::mxc_common::mxc_error::MxcError;
 
-/// Upper bound on a single §6 frame payload (relay chunk size).
+/// Upper bound on a single frame payload (relay chunk size).
 pub const MAX_FRAME_PAYLOAD: usize = 64 * 1024;
 
-/// §6 frame type. Wire byte values are load-bearing — they MUST match the
-/// DesktopControl.Exec server (Plan A).
+/// Binary relay frame type. Wire byte values are load-bearing and must match
+/// the `DesktopControl.Exec` guest host.
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum FrameType {
