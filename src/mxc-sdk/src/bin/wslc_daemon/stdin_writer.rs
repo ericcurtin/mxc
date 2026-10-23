@@ -72,34 +72,56 @@ pub fn stdin_writer(stdin: File, wake: mpsc::WeakSender<Vec<u8>>) -> (StdinWrite
     (StdinWriter(shared), stop)
 }
 
-/// Write each chunk to `stdin` on a new thread, closing it once `chunks` ends
-/// or the returned handle stops it.
+/// Write each chunk to `stdin` on a new thread, closing it once an empty chunk
+/// marks end-of-file or the returned handle stops it, and passing a write that
+/// fails for any reason but the process no longer reading to `on_failure`.
 pub fn spawn(
     stdin: File,
     chunks: mpsc::Receiver<Vec<u8>>,
     wake: mpsc::WeakSender<Vec<u8>>,
+    on_failure: impl FnOnce(std::io::Error) + Send + 'static,
 ) -> std::io::Result<StdinStop> {
     let (writer, stop) = stdin_writer(stdin, wake);
     std::thread::Builder::new()
         .name("wslc-exec-stdin".to_string())
         .spawn(move || {
-            if let StdinEnd::Failed(error) = writer.run(chunks) {
+            let mut chunks = chunks;
+            if let StdinEnd::Failed(error) = writer.write_all(&mut chunks) {
                 eprintln!("[wslc-daemon] writing exec stdin failed: {error}");
+                on_failure(error);
+
+                // Closing stdin now would let the process take what was
+                // written as its whole input before the exec is cancelled.
+                writer.wait_until_stopped();
             }
         })?;
     Ok(stop)
 }
 
 impl StdinWriter {
-    /// Write each chunk until `chunks` ends or the writer is stopped, then
-    /// close stdin.
-    pub fn run(self, mut chunks: mpsc::Receiver<Vec<u8>>) -> StdinEnd {
-        let shared = self.0;
-        while let Some(chunk) = chunks.blocking_recv() {
+    /// Write each chunk until an empty chunk marks end-of-file or the writer is
+    /// stopped, then close stdin.
+    #[cfg(test)]
+    fn run(self, mut chunks: mpsc::Receiver<Vec<u8>>) -> StdinEnd {
+        self.write_all(&mut chunks)
+    }
+
+    fn write_all(&self, chunks: &mut mpsc::Receiver<Vec<u8>>) -> StdinEnd {
+        let shared = &self.0;
+        loop {
+            // Input that ends without end-of-file is cut short, so stdin stays
+            // open until the exec decides the process no longer needs it.
+            let Some(chunk) = chunks.blocking_recv() else {
+                self.wait_until_stopped();
+                return StdinEnd::Stopped;
+            };
             {
                 let mut gate = shared.gate();
                 if gate.stopped {
                     return StdinEnd::Stopped;
+                }
+                if chunk.is_empty() {
+                    return StdinEnd::Closed;
                 }
                 gate.writing = true;
             }
@@ -121,7 +143,17 @@ impl StdinWriter {
                 };
             }
         }
-        StdinEnd::Closed
+    }
+
+    fn wait_until_stopped(&self) {
+        let mut gate = self.0.gate();
+        while !gate.stopped {
+            gate = self
+                .0
+                .write_done
+                .wait(gate)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
     }
 }
 
@@ -132,9 +164,10 @@ impl StdinStop {
             return;
         };
         shared.gate().stopped = true;
+        shared.write_done.notify_all();
 
-        // An empty chunk is never sent as input, so it only wakes an idle
-        // writer, which then sees `stopped`.
+        // An idle writer wakes on this empty chunk and sees `stopped` before it
+        // could take the chunk for end-of-file.
         if let Some(wake) = self.wake.upgrade() {
             let _ = wake.try_send(Vec::new());
         }
@@ -151,6 +184,7 @@ impl StdinStop {
                 );
                 return;
             }
+
             // SAFETY: `shared` keeps the handle open for this call; cancelling
             // another thread's synchronous write on it is supported.
             unsafe {
@@ -194,8 +228,10 @@ mod tests {
     fn pipe() -> (File, File) {
         let mut read = HANDLE::default();
         let mut write = HANDLE::default();
+
         // SAFETY: both out pointers are valid locals.
         unsafe { CreatePipe(&mut read, &mut write, None, 4096) }.expect("CreatePipe");
+
         // SAFETY: CreatePipe returned two fresh handles that nothing else owns.
         unsafe {
             (
@@ -232,6 +268,7 @@ mod tests {
             for chunk in chunks {
                 tx.blocking_send(chunk).expect("writer is receiving");
             }
+            tx.blocking_send(Vec::new()).expect("writer is receiving");
         });
         let mut received = Vec::new();
         reader.read_to_end(&mut received).expect("read to EOF");
@@ -245,22 +282,46 @@ mod tests {
     fn a_reader_that_stops_draining_stalls_only_its_own_writer() {
         let (_stalled_reader, stalled_writer) = pipe();
         let (stalled_tx, stalled_rx) = mpsc::channel(1);
-        let _stalled = spawn(stalled_writer, stalled_rx, stalled_tx.downgrade())
+        let _stalled = spawn(stalled_writer, stalled_rx, stalled_tx.downgrade(), |_| {})
             .expect("spawn the stalled writer");
         stalled_tx
             .try_send(vec![0; 1024 * 1024])
             .expect("the first chunk is queued without waiting");
 
         let (reader, writer) = pipe();
-        let (tx, rx) = mpsc::channel(1);
-        let _stop = spawn(writer, rx, tx.downgrade()).expect("spawn the second writer");
+        let (tx, rx) = mpsc::channel(2);
+        let _stop = spawn(writer, rx, tx.downgrade(), |_| {}).expect("spawn the second writer");
         tx.try_send(b"still flowing".to_vec()).unwrap();
-        drop(tx);
+        tx.try_send(Vec::new()).unwrap();
 
         assert_eq!(
             read_to_end_within(reader, Duration::from_secs(10)),
             b"still flowing",
             "a second exec's stdin must not wait on a stalled one"
+        );
+    }
+
+    #[test]
+    fn input_that_ends_without_end_of_file_leaves_stdin_open_until_stopped() {
+        let (reader, writer) = pipe();
+        let (tx, rx) = mpsc::channel(1);
+        let stop = spawn(writer, rx, tx.downgrade(), |_| {}).expect("spawn the writer");
+        let held = stop.shared.clone();
+        tx.try_send(b"partial".to_vec()).unwrap();
+        drop(tx);
+
+        // Give a writer that wrongly takes a closed channel for end-of-file
+        // time to close stdin.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            held.upgrade().is_some(),
+            "input cut short must not reach the process as end-of-file"
+        );
+
+        stop.stop();
+        assert_eq!(
+            read_to_end_within(reader, Duration::from_secs(10)),
+            b"partial"
         );
     }
 
@@ -277,10 +338,53 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_write_is_reported_and_stdin_held_open_until_the_writer_is_stopped() {
+        let path = std::env::temp_dir().join(format!(
+            "mxc-stdin-writer-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, b"").unwrap();
+        let read_only = File::open(&path).unwrap();
+        let (tx, rx) = mpsc::channel(1);
+        let (failed_tx, failed_rx) = std::sync::mpsc::channel();
+        let stop = spawn(read_only, rx, tx.downgrade(), move |error| {
+            let _ = failed_tx.send(error.kind());
+        })
+        .expect("spawn the writer");
+        let held = stop.shared.clone();
+        tx.try_send(b"lost".to_vec()).unwrap();
+
+        let kind = failed_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a failed write must be reported");
+        assert!(!is_reader_gone(&std::io::Error::from(kind)));
+
+        // Give a writer that wrongly lets go of stdin time to do so.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            held.upgrade().is_some(),
+            "stdin must stay open until the writer is stopped"
+        );
+
+        stop.stop();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while held.upgrade().is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "stopping the writer must close stdin"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(tx);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn stopping_an_idle_writer_closes_stdin_while_its_sender_lives() {
         let (reader, writer) = pipe();
         let (tx, rx) = mpsc::channel(1);
-        let stop = spawn(writer, rx, tx.downgrade()).expect("spawn the writer");
+        let stop = spawn(writer, rx, tx.downgrade(), |_| {}).expect("spawn the writer");
 
         stop.stop();
 
@@ -293,7 +397,10 @@ mod tests {
         let (mut reader, writer) = pipe();
         let (tx, rx) = mpsc::channel(1);
         let (writer, stop) = stdin_writer(writer, tx.downgrade());
-        let writing = std::thread::spawn(move || writer.run(rx));
+        let (ended_tx, ended_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = ended_tx.send(writer.run(rx));
+        });
         tx.try_send(vec![0; 1024 * 1024]).unwrap();
         let mut first = [0u8; 1];
         reader
@@ -302,7 +409,13 @@ mod tests {
 
         stop.stop();
 
-        assert!(matches!(writing.join().unwrap(), StdinEnd::Stopped));
+        let Ok(end) = ended_rx.recv_timeout(Duration::from_secs(10)) else {
+            // Drain the pipe so the blocked write can return and the test
+            // fails rather than hangs.
+            let _ = read_to_end_within(reader, Duration::from_secs(10));
+            panic!("stopping the writer did not abandon its blocked write");
+        };
+        assert!(matches!(end, StdinEnd::Stopped));
         let rest = read_to_end_within(reader, Duration::from_secs(10));
         assert!(rest.len() < 1024 * 1024, "the blocked write was abandoned");
         drop(tx);

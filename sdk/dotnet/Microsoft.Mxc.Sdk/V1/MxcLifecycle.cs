@@ -183,15 +183,33 @@ public static class MxcLifecycle
 
     /// <summary>
     /// Run a command in a started container and return live stdio streams.
-    /// IsolationSession and WSLC support this streaming form, including
-    /// <see cref="MxcProcess.StandardInput"/>. Windows Sandbox
-    /// lifecycle requests are available only through raw exact 1.1.0-alpha
-    /// requests.
+    /// IsolationSession and WSLC support this streaming form. A WSLC command
+    /// reads end-of-file on stdin; use <see cref="SpawnInContainerWithStdin"/>
+    /// to give it input. Windows Sandbox lifecycle requests are available only
+    /// through raw exact 1.1.0-alpha requests.
     /// </summary>
     public static MxcProcess SpawnInContainer(
         ContainerId id,
         ExecutionRequest request,
-        SpawnInContainerOptions? options = null)
+        SpawnInContainerOptions? options = null) =>
+        SpawnInContainerCore(id, request, options, stdin: false);
+
+    /// <summary>
+    /// Run a command in a started container and return live stdio streams,
+    /// including a writable <see cref="MxcProcess.StandardInput"/> whose
+    /// disposal gives the command end-of-file.
+    /// </summary>
+    public static MxcProcess SpawnInContainerWithStdin(
+        ContainerId id,
+        ExecutionRequest request,
+        SpawnInContainerOptions? options = null) =>
+        SpawnInContainerCore(id, request, options, stdin: true);
+
+    private static MxcProcess SpawnInContainerCore(
+        ContainerId id,
+        ExecutionRequest request,
+        SpawnInContainerOptions? options,
+        bool stdin)
     {
         ArgumentNullException.ThrowIfNull(request);
         var requestJson = BuildExecEnvelope(id, request, options?.Telemetry).ToJsonString();
@@ -203,8 +221,11 @@ public static class MxcLifecycle
             {
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_exec_state_aware_json(
-                    requestPtr, NoExperimentalOptIn, &handle, &error);
+                var status = stdin
+                    ? NativeMethods.mxc_exec_state_aware_with_stdin_json(
+                        requestPtr, NoExperimentalOptIn, &handle, &error)
+                    : NativeMethods.mxc_exec_state_aware_json(
+                        requestPtr, NoExperimentalOptIn, &handle, &error);
                 if (status != (int)ErrorCode.Success)
                 {
                     try
@@ -231,6 +252,19 @@ public static class MxcLifecycle
         CancellationToken cancellationToken = default) =>
         RunBlockingOperationAsync(
             () => SpawnInContainer(id, request, options),
+            lateProc => lateProc.Dispose(),
+            cancellationToken);
+
+    /// <summary>
+    /// Asynchronous form of <see cref="SpawnInContainerWithStdin"/>.
+    /// </summary>
+    public static Task<MxcProcess> SpawnInContainerWithStdinAsync(
+        ContainerId id,
+        ExecutionRequest request,
+        SpawnInContainerOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        RunBlockingOperationAsync(
+            () => SpawnInContainerWithStdin(id, request, options),
             lateProc => lateProc.Dispose(),
             cancellationToken);
 
@@ -352,9 +386,6 @@ public static class MxcLifecycle
             .ConfigureAwait(false);
         try
         {
-            // The caller has no way to write input here, so the command gets
-            // end-of-file rather than waiting for input that cannot arrive.
-            proc.StandardInput?.Dispose();
             var (result, stdout, stderr) = await proc
                 .WaitForExitWithOutputAsync(cancellationToken)
                 .ConfigureAwait(false);

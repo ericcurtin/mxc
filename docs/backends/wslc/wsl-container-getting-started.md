@@ -347,10 +347,11 @@ end-of-file on stdin at once.
 |---|---|
 | Create-and-run: `wxc-exec` with a `wslc` config, or SDK `run` / `spawn` | Not forwarded. |
 | Lifecycle exec from the CLI: `wxc-exec --operation exec` | The executor's own stdin is forwarded when it is a pipe, a file, or `NUL`, for example `type input.txt \| wxc-exec.exe --operation exec ...` or `wxc-exec.exe --operation exec ... < input.txt`. A terminal is not forwarded. |
-| Lifecycle exec from an SDK: `spawn_in_container` (Rust), `MxcLifecycle.SpawnInContainer` (.NET), `spawnInContainer` (Node) | The returned process exposes a writable stdin. Close it to give the command end-of-file. |
+| Lifecycle exec from an SDK: `spawn_in_container_with_stdin` (Rust), `MxcLifecycle.SpawnInContainerWithStdin` (.NET), `spawnInContainerWithStdin` (Node) | The returned process exposes a writable stdin. Close it to give the command end-of-file. |
+| Lifecycle exec from an SDK: `spawn_in_container` (Rust), `MxcLifecycle.SpawnInContainer` (.NET), `spawnInContainer` (Node) | Not forwarded. |
 
 The run-to-completion helpers (`run_in_container`, `RunInContainer`,
-`runInContainer`) take no input and close stdin before they wait. See
+`runInContainer`) take no input. See
 [exec stdin](wslc-state-aware.md#exec-stdin) for the details and limits.
 
 ## Configuration Reference

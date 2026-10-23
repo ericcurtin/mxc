@@ -320,7 +320,9 @@ pub struct ExecRequest {
 #[derive(Debug)]
 pub enum ExecReport {
     Finished(Result<ExecTerminal, WorkerError>),
-    Unconfirmed(String),
+
+    /// The detail, and the process's stdin if it is still open.
+    Unconfirmed(String, Option<container_steps::StdinHold>),
 }
 
 /// Everything an off-worker exec needs, in a form that can cross a thread.
@@ -390,7 +392,7 @@ fn start_exec(
             // A panic leaves the process's fate unknown, which is what
             // `Unconfirmed` already means.
             let report = std::panic::catch_unwind(run).unwrap_or_else(|_| {
-                ExecReport::Unconfirmed("the exec thread panicked".to_string())
+                ExecReport::Unconfirmed("the exec thread panicked".to_string(), None)
             });
 
             let _ = worker.send(WorkerCommand::ExecFinished { sandbox_id, report });
@@ -414,14 +416,21 @@ fn run_exec(job: ExecJob, logger: &mut Logger) -> ExecReport {
 
     // `_run_alive` is held until this run returns, which is what tells an
     // attached stdin relay to stop.
+    let stdin_failure = Arc::new(Mutex::new(None::<String>));
     let (stdin, _run_alive) = match stdin {
         Some(StdinSource {
             chunks,
             wake,
             run_alive,
         }) => {
+            let failure = Arc::clone(&stdin_failure);
+            let cancel = Arc::clone(&cancellation);
             let consumer: StdinConsumer = Box::new(move |stdin| {
-                let stop = crate::stdin_writer::spawn(stdin, chunks, wake)?;
+                let stop = crate::stdin_writer::spawn(stdin, chunks, wake, move |error| {
+                    *failure.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(format!("writing the process's stdin failed: {error}"));
+                    cancel.store(true, Ordering::Release);
+                })?;
                 Ok(Box::new(move || stop.stop()))
             });
             (Some(consumer), Some(run_alive))
@@ -465,9 +474,19 @@ fn run_exec(job: ExecJob, logger: &mut Logger) -> ExecReport {
                 .post_launch_error
                 .map(|error| error.error_message)
                 .unwrap_or_else(|| "process termination could not be confirmed".to_string()),
+            outcome.held_stdin,
         ),
         container_steps::ProcessCompletion::Confirmed(terminal) => {
-            ExecReport::Finished(Ok(terminal))
+            match stdin_failure
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                Some(failure) => {
+                    ExecReport::Finished(Err(WorkerError::Backend(anyhow::anyhow!(failure))))
+                }
+                None => ExecReport::Finished(Ok(terminal)),
+            }
         }
     }
 }
@@ -2486,9 +2505,13 @@ impl Worker {
 
         let outcome = match report {
             ExecReport::Finished(outcome) => outcome,
-            ExecReport::Unconfirmed(detail) => {
-                Err(self.quarantine(sandbox_id, in_flight.container, &detail, in_flight.slot))
-            }
+            ExecReport::Unconfirmed(detail, held_stdin) => Err(self.quarantine(
+                sandbox_id,
+                in_flight.container,
+                &detail,
+                in_flight.slot,
+                held_stdin,
+            )),
         };
 
         if let Err(orphaned) = in_flight.done.send(outcome) {
@@ -2510,12 +2533,20 @@ impl Worker {
         container: WslcContainer,
         detail: &str,
         slot: Option<ExecSlotGuard>,
+        held_stdin: Option<container_steps::StdinHold>,
     ) -> WorkerError {
         let delete_result = self.sdk.as_ref().map(|sdk| {
             // SAFETY: `sdk` is valid and `container` is the live handle stored
             // for `sandbox_id`.
             unsafe { container_steps::delete_daemon_container(sdk, container, &mut self.logger) }
         });
+
+        // Until the container is gone its process may still be running, so it
+        // keeps its stdin open for as long as it keeps its slot.
+        let slot = match (slot, held_stdin) {
+            (slot, None) => slot,
+            (slot, Some(held_stdin)) => Some(Arc::new((slot, held_stdin)) as ExecSlotGuard),
+        };
 
         match delete_result {
             Some(Ok(())) => {
@@ -5925,7 +5956,7 @@ mod tests {
 
         worker.finish_exec(
             "wslc:busy",
-            ExecReport::Unconfirmed("the exit callback never fired".to_string()),
+            ExecReport::Unconfirmed("the exit callback never fired".to_string(), None),
             &tx,
         );
 
@@ -5945,7 +5976,7 @@ mod tests {
         worker.exec_in_flight.get_mut("wslc:busy").unwrap().slot = Some(Arc::new(permit));
         worker.finish_exec(
             "wslc:busy",
-            ExecReport::Unconfirmed("the exit callback never fired".to_string()),
+            ExecReport::Unconfirmed("the exit callback never fired".to_string(), None),
             &tx,
         );
         assert_eq!(
@@ -5974,7 +6005,7 @@ mod tests {
 
         worker.finish_exec(
             "wslc:busy",
-            ExecReport::Unconfirmed("the exit callback never fired".to_string()),
+            ExecReport::Unconfirmed("the exit callback never fired".to_string(), None),
             &tx,
         );
 

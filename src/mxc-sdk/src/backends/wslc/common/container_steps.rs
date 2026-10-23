@@ -1314,6 +1314,10 @@ pub struct ExecOutcome {
     /// Specific post-process-creation failure that made termination
     /// unobservable. The daemon uses this context when quarantining.
     pub post_launch_error: Option<ScriptResponse>,
+
+    /// The process's stdin, still open because its termination was not
+    /// confirmed.
+    pub held_stdin: Option<StdinHold>,
 }
 
 /// Run `script_code` (under `/bin/sh -c`) as a fresh process inside a started
@@ -1375,10 +1379,11 @@ pub unsafe fn exec_in_container(
     // reclaim it. Disarm the settings guard so it is not freed underneath the SDK.
     process_settings.mark_process_created();
 
-    let mut stdin_guard = StdinGuard(None);
+    let mut stdin_guard = StdinHold::default();
+    let forwards_stdin = stdin.is_some();
     if let Some(consumer) = stdin {
         match attach_stdin(sdk, process_guard.as_raw(), consumer) {
-            Ok(close) => stdin_guard.0 = Some(close),
+            Ok(close) => stdin_guard = StdinHold::new(close),
             Err(error) => {
                 // A process holding a stdin nobody writes or closes would never
                 // see end-of-file, so it is killed rather than left to run.
@@ -1392,6 +1397,7 @@ pub unsafe fn exec_in_container(
                     stdout: Vec::new(),
                     stderr: Vec::new(),
                     post_launch_error: Some(error),
+                    held_stdin: None,
                 });
             }
         }
@@ -1405,16 +1411,13 @@ pub unsafe fn exec_in_container(
             stdout: Vec::new(),
             stderr: Vec::new(),
             post_launch_error: Some(sdk_error("WslcGetProcessExitEvent failed", hr, "")),
+            held_stdin: Some(stdin_guard),
         });
     }
 
     let timeout = (timeout_ms > 0).then(|| Duration::from_millis(u64::from(timeout_ms)));
     let exit_wait =
         wait_for_exit_event(exit_event, process_settings.io_ctx(), timeout, cancellation);
-
-    // A process still reading stdin needs end-of-file to exit if the kill
-    // below fails.
-    stdin_guard.close();
 
     if let ExitWait::Failed {
         wait_result,
@@ -1434,21 +1437,33 @@ pub unsafe fn exec_in_container(
         _ => None,
     };
     if let Some(interruption) = interruption {
-        let _ = writeln!(
-            logger,
-            "[WSLC][daemon] exec {} — killing process",
-            interruption.get_interruption_word()
-        );
-        // Kill only this process; the keepalive init keeps the container up.
-        let kill_hr =
-            sdk.WslcSignalProcess(process_guard.as_raw(), WslcSignal::WSLC_SIGNAL_SIGKILL);
-        if kill_hr != S_OK {
+        if forwards_stdin {
+            // Signalling the process closes its stdin even when the signal is
+            // not delivered, which would let it act on input that was cut short.
             let _ = writeln!(
                 logger,
-                "[WSLC][daemon] Warning: WslcSignalProcess(SIGKILL) failed (hr=0x{:08X}); \
-                 process may still be running",
-                kill_hr as u32
+                "[WSLC][daemon] exec {} — not signalling a process that reads forwarded \
+                 stdin; it is stopped with its container",
+                interruption.get_interruption_word()
             );
+        } else {
+            let _ = writeln!(
+                logger,
+                "[WSLC][daemon] exec {} — killing process",
+                interruption.get_interruption_word()
+            );
+
+            // Kill only this process; the keepalive init keeps the container up.
+            let kill_hr =
+                sdk.WslcSignalProcess(process_guard.as_raw(), WslcSignal::WSLC_SIGNAL_SIGKILL);
+            if kill_hr != S_OK {
+                let _ = writeln!(
+                    logger,
+                    "[WSLC][daemon] Warning: WslcSignalProcess(SIGKILL) failed (hr=0x{:08X}); \
+                     process may still be running",
+                    kill_hr as u32
+                );
+            }
         }
     }
 
@@ -1530,27 +1545,51 @@ pub unsafe fn exec_in_container(
         ProcessCompletion::TerminationUnconfirmed => {}
     }
 
+    // A process that may still be running keeps its stdin open, so it cannot
+    // take a cut-short input as complete before it is stopped.
+    let held_stdin = match completion {
+        ProcessCompletion::Confirmed(_) => {
+            drop(stdin_guard);
+            None
+        }
+        ProcessCompletion::TerminationUnconfirmed => Some(stdin_guard),
+    };
+
     Ok(ExecOutcome {
         completion,
         stdout,
         stderr,
         post_launch_error: None,
+        held_stdin,
     })
 }
 
-struct StdinGuard(Option<Box<dyn FnOnce() + Send>>);
+/// A process's stdin, closed when this is dropped.
+#[derive(Default)]
+pub struct StdinHold(Mutex<Option<Box<dyn FnOnce() + Send>>>);
 
-impl StdinGuard {
-    fn close(&mut self) {
-        if let Some(close) = self.0.take() {
+impl StdinHold {
+    fn new(close: Box<dyn FnOnce() + Send>) -> Self {
+        Self(Mutex::new(Some(close)))
+    }
+}
+
+impl Drop for StdinHold {
+    fn drop(&mut self) {
+        let close = self
+            .0
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(close) = close {
             close();
         }
     }
 }
 
-impl Drop for StdinGuard {
-    fn drop(&mut self) {
-        self.close();
+impl std::fmt::Debug for StdinHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StdinHold")
     }
 }
 
@@ -1575,6 +1614,7 @@ unsafe fn attach_stdin(
     if hr != S_OK || handle.is_null() {
         return Err(sdk_error("WslcGetProcessIOHandle(stdin) failed", hr, ""));
     }
+
     // SAFETY: the SDK transfers ownership of the returned handle to the caller.
     let stdin = std::fs::File::from_raw_handle(handle);
     consumer(stdin).map_err(|error| {

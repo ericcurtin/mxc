@@ -61,14 +61,22 @@ const DEFAULT_IMAGE: &str = "alpine:latest";
 #[cfg(windows)]
 const PIPE_BRIDGE_MAX_BUFFERED_BYTES: usize = 8 * 1024 * 1024;
 
-/// State-aware WSLc backend. Zero-sized: every phase opens a fresh
-/// [`DaemonClient`] connection (the daemon holds all persistent state).
+/// State-aware WSLc backend. Every phase opens a fresh [`DaemonClient`]
+/// connection (the daemon holds all persistent state).
 #[derive(Debug, Default, Clone, Copy)]
-pub struct WslcStateAwareRunner;
+pub struct WslcStateAwareRunner {
+    forward_stdin: bool,
+}
 
 impl WslcStateAwareRunner {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub fn with_piped_stdin() -> Self {
+        Self {
+            forward_stdin: true,
+        }
     }
 }
 
@@ -181,8 +189,9 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
     /// Runs one command in the warm container. Relayed callers receive live
     /// output on this process's stdout/stderr, and the command reads this
     /// process's stdin unless it is a terminal; piped callers receive
-    /// synthesized native stdin/stdout/stderr pipes bridged to the same daemon
-    /// streams.
+    /// synthesized native stdout/stderr pipes bridged to the same daemon
+    /// streams, plus a stdin pipe if the runner was made
+    /// [`with_piped_stdin`](Self::with_piped_stdin).
     fn exec(
         &mut self,
         sandbox_id: &str,
@@ -197,7 +206,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
 
         match stdio {
             ExecStdio::Relayed => exec_relayed(client, config),
-            ExecStdio::Piped => exec_piped(client, config, exec_id, run_token),
+            ExecStdio::Piped => exec_piped(client, config, exec_id, run_token, self.forward_stdin),
         }
     }
 
@@ -418,6 +427,7 @@ fn exec_piped(
     mut config: ExecConfig,
     exec_id: String,
     run_token: String,
+    forward_stdin: bool,
 ) -> Result<ExecHandle, MxcError> {
     use crate::mxc_common::process_util::{create_local_pipe, InterruptiblePipeReader};
     use crate::mxc_common::sandbox_process::StreamCloser;
@@ -426,12 +436,16 @@ fn exec_piped(
         .map_err(|error| MxcError::backend_error(format!("create WSLC stdout pipe: {error}")))?;
     let stderr_pipe = prepare_native_output()
         .map_err(|error| MxcError::backend_error(format!("create WSLC stderr pipe: {error}")))?;
-    let (stdin_read, stdin_write) = create_local_pipe()
-        .map_err(|error| MxcError::backend_error(format!("create WSLC stdin pipe: {error}")))?;
-    let stdin_read = InterruptiblePipeReader::new(stdin_read);
-    let stdin_write = stdin_write
-        .try_into_std_owned_handle()
-        .map_err(|error| MxcError::backend_error(format!("create WSLC stdin pipe: {error}")))?;
+    let stdin_pipe = if forward_stdin {
+        let (read, write) = create_local_pipe()
+            .map_err(|error| MxcError::backend_error(format!("create WSLC stdin pipe: {error}")))?;
+        let write = write
+            .try_into_std_owned_handle()
+            .map_err(|error| MxcError::backend_error(format!("create WSLC stdin pipe: {error}")))?;
+        Some((InterruptiblePipeReader::new(read), write))
+    } else {
+        None
+    };
     let (stdout_writer, stdout_source, stdout_overflow) =
         bounded_stream_pair(PIPE_BRIDGE_MAX_BUFFERED_BYTES);
     let (stderr_writer, stderr_source, stderr_overflow) =
@@ -444,9 +458,14 @@ fn exec_piped(
         .map_err(|error| MxcError::backend_error(format!("start WSLC stderr pump: {error}")))?;
     let stdout = windows::Win32::Foundation::HANDLE(stdout_reader.as_raw_handle());
     let stderr = windows::Win32::Foundation::HANDLE(stderr_reader.as_raw_handle());
-    let stdin = windows::Win32::Foundation::HANDLE(stdin_write.as_raw_handle());
-    let stdin_canceller = stdin_read.canceller();
-    let stdin_write = Arc::new(Mutex::new(Some(stdin_write)));
+    let stdin = stdin_pipe
+        .as_ref()
+        .map_or_else(null_pipe_handle, |(_, write)| {
+            windows::Win32::Foundation::HANDLE(write.as_raw_handle())
+        });
+    let (stdin_read, stdin_write) = stdin_pipe.unzip();
+    let stdin_canceller = stdin_read.as_ref().map(InterruptiblePipeReader::canceller);
+    let stdin_write = Arc::new(Mutex::new(stdin_write));
     let closer_stdin_write = Arc::clone(&stdin_write);
     let terminator_client = client.clone();
     let relay_exec_id = exec_id.clone();
@@ -454,7 +473,7 @@ fn exec_piped(
     let cancellation = Arc::new(AtomicBool::new(false));
     let relay_cancellation = Arc::clone(&cancellation);
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
-    config.stdin = true;
+    config.stdin = forward_stdin;
 
     std::thread::Builder::new()
         .name("wslc-state-aware-exec".to_string())
@@ -465,12 +484,12 @@ fn exec_piped(
                 .and_then(|exec| {
                     if relay_cancellation.load(Ordering::Acquire) {
                         client.cancel_exec(relay_exec_id, relay_run_token)?;
-                    } else {
+                    } else if let Some(input) = stdin_read {
                         start_stdin_pump(
                             &client,
                             relay_exec_id,
                             relay_run_token,
-                            stdin_read,
+                            input,
                             &forwarding,
                         );
                     }
@@ -502,7 +521,9 @@ fn exec_piped(
 
             // The caller may never close its stdin, so the pump's read is
             // ended here rather than left waiting on a run that is over.
-            stdin_canceller.close();
+            if let Some(canceller) = stdin_canceller {
+                canceller.close();
+            }
             stdout_writer.close();
             stderr_writer.close();
             let _ = done_tx.send(result);
@@ -518,16 +539,19 @@ fn exec_piped(
             MxcError::backend_error(format!("start WSLC exec stream thread: {error}"))
         })?;
 
-    Ok(ExecHandle {
-        stdout,
-        stderr,
-        stdin,
-        stdin_closer: Some(Box::new(move || {
+    let stdin_closer: Option<Box<dyn FnOnce() + Send>> = forward_stdin.then(|| {
+        Box::new(move || {
             closer_stdin_write
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .take();
-        })),
+        }) as Box<dyn FnOnce() + Send>
+    });
+    Ok(ExecHandle {
+        stdout,
+        stderr,
+        stdin,
+        stdin_closer,
         waiter: Box::new(move || {
             // A native handle transfer never calls `stdin_closer`, so this is
             // what leaves the caller's copy as the only stdin write end.
@@ -560,6 +584,7 @@ fn exec_piped(
     _config: ExecConfig,
     _exec_id: String,
     _run_token: String,
+    _forward_stdin: bool,
 ) -> Result<ExecHandle, MxcError> {
     Err(MxcError::backend_unavailable(
         "WSLc piped execution is available only on Windows",
@@ -994,6 +1019,30 @@ mod stdin_relay_tests {
     }
 
     #[test]
+    fn a_piped_exec_without_stdin_gives_the_command_end_of_file() {
+        let daemon = TestDaemon::start();
+        let handle = exec_piped(
+            daemon.client.clone(),
+            config(),
+            "exec-1".to_string(),
+            "run-1".to_string(),
+            false,
+        )
+        .unwrap();
+        let mut exec = daemon.next();
+        assert!(matches!(&exec.request, DaemonRequest::Exec(config) if !config.stdin));
+        exec.reply(&DaemonResponse::Ok);
+        exec.reply(&StreamFrame::Exit { code: 0 });
+
+        assert!(handle.stdin.0.is_null());
+        assert!(handle.stdin_closer.is_none());
+        assert_eq!(
+            within("the waiter", handle.waiter).unwrap(),
+            ExecOutcome::Exited(0)
+        );
+    }
+
+    #[test]
     fn killing_a_piped_exec_while_its_stdin_is_backed_up_ends_the_exec_and_the_write() {
         let daemon = TestDaemon::start();
         let handle = exec_piped(
@@ -1001,6 +1050,7 @@ mod stdin_relay_tests {
             config(),
             "exec-1".to_string(),
             "run-1".to_string(),
+            true,
         )
         .unwrap();
         let mut exec = daemon.next();

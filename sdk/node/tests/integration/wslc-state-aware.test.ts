@@ -22,6 +22,7 @@ import {
 import {
   deprovisionContainer,
   spawnInContainer,
+  spawnInContainerWithStdin,
   runInContainer,
   provisionContainer,
   startContainer,
@@ -108,6 +109,11 @@ describe('WSLC state-aware lifecycle E2E', {
         const streamed = await spawnInContainer(containerId, { command: 'echo NODE_WSLC_STREAM_FIRST; sleep 2; ' +
               'echo NODE_WSLC_STREAM_LAST; echo NODE_WSLC_STREAM_ERR >&2' });
         try {
+          assert.equal(
+            streamed.standardInput,
+            null,
+            'spawnInContainer gives a WSLC command no stdin',
+          );
           const stdoutPromise = collect(streamed.standardOutput, (chunk) => {
             if (
               firstChunkAt === undefined &&
@@ -140,10 +146,10 @@ describe('WSLC state-aware lifecycle E2E', {
 
         const payload = Buffer.alloc(64 * 1024);
         for (let i = 0; i < payload.length; i++) payload[i] = i % 256;
-        const echoed = await spawnInContainer(containerId, { command: 'cat', timeoutMs: 60_000 });
+        const echoed = await spawnInContainerWithStdin(containerId, { command: 'cat', timeoutMs: 60_000 });
         try {
           const stdin = echoed.standardInput;
-          assert.ok(stdin !== null, 'WSLC exposes stdin for an exec in a container');
+          assert.ok(stdin !== null, 'spawnInContainerWithStdin exposes stdin');
           const stdoutPromise = collectBytes(echoed.standardOutput);
           stdin.end(payload);
           const [result, stdout] = await Promise.all([echoed.wait(), stdoutPromise]);

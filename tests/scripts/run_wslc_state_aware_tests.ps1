@@ -351,6 +351,47 @@ function Close-StateAwareStdin {
     try { $Handle.Stdin.Close() } catch { }
 }
 
+# Provision and start a sandbox for one test, returning its ID, or $null after
+# recording the failure.
+function New-StartedStdinSandbox {
+    $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
+    $envObj = Assert-ResultEnvelope $r "stdin test sandbox provision"
+    if ($null -eq $envObj) { return $null }
+    $id = [string]$envObj.result.sandboxId
+    $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $id
+    if ($null -eq (Assert-ResultEnvelope $r "stdin test sandbox start")) {
+        Remove-StdinSandbox $id
+        return $null
+    }
+    $id
+}
+
+# Deprovision a test sandbox that quarantine may already have deleted.
+function Remove-StdinSandbox {
+    param([string]$Id)
+    try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $Id } catch { }
+}
+
+# Once the sandbox's interrupted run is over, check that the command never ran
+# its step after end-of-file.
+function Assert-StdinCutShortNeverSeen {
+    param([string]$Id, [string]$Marker)
+    $probe = @{ phase = 'exec'; sandboxId = $Id; process = @{
+        commandLine = "sh -c 'test -e /tmp/$Marker && echo MARKER-FOUND || echo NO-MARKER'"
+        timeout = 60000 } }
+    $deadline = (Get-Date).AddSeconds(180)
+    do {
+        $r = Invoke-StateAware -Request $probe
+        $busy = $r.Stderr -match 'already has an exec in flight'
+        if ($busy) { Start-Sleep -Seconds 2 }
+    } while ($busy -and (Get-Date) -lt $deadline)
+    Assert-True (-not $busy) "the interrupted run ended (stderr: $($r.Stderr.Trim()))"
+    Assert-True ($r.Stdout -notmatch 'MARKER-FOUND') `
+        "the command never acted on its cut-short input (stdout: $($r.Stdout.Trim()))"
+    Assert-True (($r.Stdout -match 'NO-MARKER') -or ($r.ExitCode -ne 0)) `
+        "the probe ran or the sandbox was quarantined (stderr: $($r.Stderr.Trim()))"
+}
+
 # Complete a Start-StateAware handle. Returns
 # @{ ExitCode; Stdout; Stderr; StartedAt; EndedAt } with UTC timestamps.
 function Wait-StateAware {
@@ -2093,18 +2134,6 @@ try {
             Assert-True ($r.ExitCode -eq 0) "the command exits 0 (stderr: $($r.Stderr.Trim()))"
             Assert-True ($r.Stdout -match 'IGNORES-STDIN') "the command ran"
         } | Out-Null
-
-        Run-StateAwareTest "S: a reader waiting on a stdin that never closes still times out" {
-            $req = @{ phase = 'exec'; sandboxId = $script:inSandbox; process = @{ commandLine = 'cat'; timeout = 3000 } }
-            $h = Start-StateAware -Request $req -WriteStdin
-            $exited = $h.Process.WaitForExit(60000)
-            Assert-True $exited "the executor exited after the timeout"
-            if (-not $exited) { try { $h.Process.Kill() } catch { } }
-            Close-StateAwareStdin $h
-            $r = Wait-StateAware $h
-            Assert-True ($r.ExitCode -ne 0) "a timed-out exec exits non-zero"
-            Assert-True ($r.Stderr -match 'timed out') "the timeout is reported (stderr: $($r.Stderr.Trim()))"
-        } | Out-Null
     }
 
     if ($inReady -and $inPeerReady) {
@@ -2137,6 +2166,49 @@ try {
             Assert-True ($r.Stdout -match 'FLOODED-DONE') "the flooded command ran to completion"
         } | Out-Null
     }
+
+    # A run whose process cannot be confirmed stopped keeps the process's stdin
+    # open until its container is quarantined and deleted, so these cases each
+    # take a sandbox of their own.
+    Run-StateAwareTest "S: a reader timed out while its stdin is open never sees end-of-file" {
+        $id = New-StartedStdinSandbox
+        if ($null -eq $id) { return }
+        try {
+            $req = @{ phase = 'exec'; sandboxId = $id; process = @{ commandLine = "sh -c 'cat; touch /tmp/saw-eof'"; timeout = 3000 } }
+            $h = Start-StateAware -Request $req -WriteStdin
+            $exited = $h.Process.WaitForExit(240000)
+            Assert-True $exited "the executor exited after the timeout"
+            if (-not $exited) { try { $h.Process.Kill() } catch { } }
+            Close-StateAwareStdin $h
+            $r = Wait-StateAware $h
+            Assert-True ($r.ExitCode -ne 0) "a timed-out exec exits non-zero"
+            Assert-StdinCutShortNeverSeen $id 'saw-eof'
+        } finally {
+            Remove-StdinSandbox $id
+        }
+    } | Out-Null
+
+    Run-StateAwareTest "S: input cut short by a dropped stdin connection is never taken as complete" {
+        $id = New-StartedStdinSandbox
+        if ($null -eq $id) { return }
+        try {
+            $req = @{ phase = 'exec'; sandboxId = $id; process = @{ commandLine = "sh -c 'cat > /tmp/staged && mv /tmp/staged /tmp/published'" } }
+            $h = Start-StateAware -Request $req -WriteStdin
+            $partial = [System.Text.Encoding]::UTF8.GetBytes("PARTIAL-INPUT`n")
+            $h.Stdin.Write($partial, 0, $partial.Length)
+            $h.Stdin.Flush()
+            Start-Sleep -Seconds 3
+
+            # Killing the executor drops its stdin connection before end-of-file.
+            try { $h.Process.Kill() } catch { }
+            $null = $h.Process.WaitForExit(30000)
+            Close-StateAwareStdin $h
+            $null = Wait-StateAware $h
+            Assert-StdinCutShortNeverSeen $id 'published'
+        } finally {
+            Remove-StdinSandbox $id
+        }
+    } | Out-Null
 
     foreach ($entry in @(
         @{ Name = 'stdin'; Id = $script:inSandbox; Var = 'inDeprovisionedOk' },

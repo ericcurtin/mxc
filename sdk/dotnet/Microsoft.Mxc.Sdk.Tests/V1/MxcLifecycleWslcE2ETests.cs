@@ -67,7 +67,7 @@ public class MxcLifecycleWslcE2ETests
     }
 
     [Fact]
-    public async Task SpawnInContainer_ForwardsEveryByteAndClosingStdinEndsInput()
+    public async Task SpawnInContainerWithStdin_ForwardsEveryByteAndClosingStdinEndsInput()
     {
         RequireWslc();
         using var container = new StartedContainer();
@@ -77,7 +77,7 @@ public class MxcLifecycleWslcE2ETests
             payload[i] = (byte)(i % 256);
         }
 
-        using var proc = MxcLifecycle.SpawnInContainer(
+        using var proc = MxcLifecycle.SpawnInContainerWithStdin(
             container.Id,
             new ExecutionRequest("cat") { TimeoutMs = 60_000 });
         var stdin = proc.StandardInput;
@@ -109,12 +109,12 @@ public class MxcLifecycleWslcE2ETests
     }
 
     [Fact]
-    public void SpawnInContainer_ACommandThatIgnoresStdinFinishesWhileItIsOpen()
+    public void SpawnInContainerWithStdin_ACommandThatIgnoresStdinFinishesWhileItIsOpen()
     {
         RequireWslc();
         using var container = new StartedContainer();
 
-        using var proc = MxcLifecycle.SpawnInContainer(
+        using var proc = MxcLifecycle.SpawnInContainerWithStdin(
             container.Id,
             new ExecutionRequest("echo IGNORES-STDIN") { TimeoutMs = 60_000 });
         var stdin = proc.StandardInput;
@@ -130,19 +130,21 @@ public class MxcLifecycleWslcE2ETests
     }
 
     [Fact]
-    public async Task SpawnInContainer_WaitClosesAnUntakenStdin()
+    public void SpawnInContainer_GivesACommandThatReadsStdinEndOfFile()
     {
         RequireWslc();
         using var container = new StartedContainer();
 
         using var proc = MxcLifecycle.SpawnInContainer(
             container.Id,
-            new ExecutionRequest("sh -c 'cat; echo WAIT-SAW-EOF'") { TimeoutMs = 60_000 });
-        var (result, stdout, _) =
-            await proc.WaitForExitWithOutputAsync(TestContext.Current.CancellationToken);
+            new ExecutionRequest("sh -c 'cat; echo SPAWN-SAW-EOF'") { TimeoutMs = 60_000 });
+        Assert.Null(proc.StandardInput);
+        using var reader = new StreamReader(proc.StandardOutput!, Encoding.UTF8);
+        var stdout = reader.ReadToEnd();
+        var result = proc.Wait();
 
-        Assert.False(result.TimedOut, "waiting must close a stdin the caller never took");
+        Assert.False(result.TimedOut, "without stdin the command reads end-of-file at once");
         Assert.Equal(0, result.ExitCode);
-        Assert.Equal("WAIT-SAW-EOF", Encoding.UTF8.GetString(stdout).Trim());
+        Assert.Equal("SPAWN-SAW-EOF", stdout.Trim());
     }
 }

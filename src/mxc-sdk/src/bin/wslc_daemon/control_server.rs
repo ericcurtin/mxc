@@ -66,9 +66,10 @@ const MAX_CONCURRENT_EXECS: usize = 8;
 /// waits can be outstanding.
 const CONTROL_CLIENT_HEADROOM: usize = 8;
 
-/// Upper bound on concurrently-serviced client connections. Connections beyond
+/// Upper bound on concurrently-serviced client connections, with room for each
+/// exec's stdin connection on top of the lifecycle headroom. Connections beyond
 /// this bound are refused without blocking the accept loop.
-const MAX_CONCURRENT_CLIENTS: usize = MAX_CONCURRENT_EXECS + CONTROL_CLIENT_HEADROOM;
+const MAX_CONCURRENT_CLIENTS: usize = 2 * MAX_CONCURRENT_EXECS + CONTROL_CLIENT_HEADROOM;
 
 /// Connections admitted once [`MAX_CONCURRENT_CLIENTS`] is reached, only to
 /// cancel an exec or carry its stdin: room for one of each per exec.
@@ -642,11 +643,12 @@ where
         DaemonRequest::ExecStdin(config) => {
             match session.take_exec_stdin(&config.exec_id, &config.run_token) {
                 Ok(relay) => {
-                    write_frame(&mut pipe, &DaemonResponse::Ok).await?;
-                    relay_stdin(&mut pipe, relay, || {
-                        session.cancel_exec(&config.exec_id, &config.run_token)
-                    })
-                    .await?;
+                    let abort = || session.cancel_exec(&config.exec_id, &config.run_token);
+                    if let Err(error) = write_frame(&mut pipe, &DaemonResponse::Ok).await {
+                        abort();
+                        return Err(error);
+                    }
+                    relay_stdin(&mut pipe, relay, abort).await?;
                 }
                 Err(e) => write_frame(&mut pipe, &worker_err_response(e)).await?,
             }
@@ -682,6 +684,7 @@ async fn forward_stdin_frames<S: AsyncRead + Unpin>(
     chunks: &mpsc::Sender<Vec<u8>>,
     run_over: &mut oneshot::Receiver<()>,
 ) -> Result<()> {
+    let mut reader_gone = false;
     loop {
         let frame = tokio::select! {
             _ = &mut *run_over => return Ok(()),
@@ -690,7 +693,15 @@ async fn forward_stdin_frames<S: AsyncRead + Unpin>(
             }
         };
         let data = match frame {
-            StreamFrame::Stdin { data } if data.is_empty() => return Ok(()),
+            StreamFrame::Stdin { data } if data.is_empty() => {
+                if !reader_gone {
+                    tokio::select! {
+                        _ = &mut *run_over => {}
+                        _ = chunks.send(Vec::new()) => {}
+                    }
+                }
+                return Ok(());
+            }
             StreamFrame::Stdin { data } if data.len() > MAX_STDIN_CHUNK_BYTES => {
                 bail!(
                     "stdin chunk of {} bytes exceeds {MAX_STDIN_CHUNK_BYTES}",
@@ -700,11 +711,16 @@ async fn forward_stdin_frames<S: AsyncRead + Unpin>(
             StreamFrame::Stdin { data } => data,
             other => bail!("expected a stdin frame on an exec_stdin connection, got {other:?}"),
         };
+        if reader_gone {
+            continue;
+        }
+
+        // A process may close its stdin and keep working. Input it will never
+        // read is discarded rather than refused, since refusing it would make
+        // the client cancel the exec.
         tokio::select! {
             _ = &mut *run_over => return Ok(()),
-            sent = chunks.send(data) => if sent.is_err() {
-                return Ok(());
-            },
+            sent = chunks.send(data) => reader_gone = sent.is_err(),
         }
     }
 }
@@ -943,7 +959,7 @@ mod tests {
 
         assert_eq!(per_exec, 16 * 1024 * 1024);
         assert_eq!(worst_case, 128 * 1024 * 1024);
-        assert_eq!(MAX_CONCURRENT_CLIENTS, 16);
+        assert_eq!(MAX_CONCURRENT_CLIENTS, 24);
     }
 
     /// Cancellation is the only way to end a run with no timeout, so it must
@@ -1175,6 +1191,19 @@ mod tests {
         clients: &mut JoinSet<()>,
         cancel_limiter: &Arc<Semaphore>,
     ) -> tokio::net::windows::named_pipe::NamedPipeClient {
+        let client_limiter = Arc::new(Semaphore::new(1));
+        let _held = client_limiter.clone().try_acquire_owned().unwrap();
+        connection_through(session, clients, &client_limiter, cancel_limiter).await
+    }
+
+    /// Route one accepted connection through the router with the given limits,
+    /// and hand back the client end of it.
+    async fn connection_through(
+        session: &SessionHandle,
+        clients: &mut JoinSet<()>,
+        client_limiter: &Arc<Semaphore>,
+        cancel_limiter: &Arc<Semaphore>,
+    ) -> tokio::net::windows::named_pipe::NamedPipeClient {
         let name = test_pipe_name();
         let server = ServerOptions::new()
             .first_pipe_instance(true)
@@ -1185,11 +1214,9 @@ mod tests {
             .unwrap();
         server.connect().await.unwrap();
 
-        let client_limiter = Arc::new(Semaphore::new(1));
-        let _held = client_limiter.clone().try_acquire_owned().unwrap();
         spawn_client_handler(
             clients,
-            &client_limiter,
+            client_limiter,
             cancel_limiter,
             &Arc::new(Semaphore::new(MAX_CONCURRENT_EXECS)),
             session,
@@ -1197,6 +1224,35 @@ mod tests {
             server,
         );
         client
+    }
+
+    #[tokio::test]
+    async fn lifecycle_work_is_served_while_every_exec_streams_stdin() {
+        let session = spawn().unwrap();
+        let client_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS));
+        let cancel_limiter = Arc::new(Semaphore::new(CANCEL_LANE_SLOTS));
+        let mut clients = JoinSet::new();
+
+        // Each exec connection and its stdin connection take a general slot
+        // whenever one is free.
+        let _execs_and_stdin: Vec<_> = (0..2 * MAX_CONCURRENT_EXECS)
+            .map(|_| client_limiter.clone().try_acquire_owned().unwrap())
+            .collect();
+
+        let mut client =
+            connection_through(&session, &mut clients, &client_limiter, &cancel_limiter).await;
+        write_frame(&mut client, &DaemonRequest::Ping)
+            .await
+            .unwrap();
+
+        let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(
+            response,
+            DaemonResponse::Pong,
+            "lifecycle work must keep its headroom while every exec streams stdin"
+        );
+        clients.shutdown().await;
+        session.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1783,7 +1839,8 @@ mod tests {
         assert_eq!(response, DaemonResponse::Ok);
         assert_eq!(
             delivered(&mut source).await,
-            vec![b"hello ".to_vec(), b"world".to_vec()]
+            vec![b"hello ".to_vec(), b"world".to_vec(), Vec::new()],
+            "end-of-file reaches the writer as an empty chunk"
         );
         session.shutdown().await.unwrap();
     }
@@ -1875,7 +1932,10 @@ mod tests {
             .unwrap();
         write_frame(&mut first, &stdin_frame(b"")).await.unwrap();
         first_handler.await.unwrap().unwrap();
-        assert_eq!(delivered(&mut source).await, vec![b"owner".to_vec()]);
+        assert_eq!(
+            delivered(&mut source).await,
+            vec![b"owner".to_vec(), Vec::new()]
+        );
         session.shutdown().await.unwrap();
     }
 
@@ -1963,6 +2023,44 @@ mod tests {
         assert!(end_stdin_without_end_of_file(output, false)
             .await
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn input_sent_after_the_process_stops_reading_is_discarded_without_cancelling() {
+        let session = spawn().unwrap();
+        let (_registration, cancellation, source) = register_stdin_exec(&session, "exec-1");
+        drop(source.chunks);
+        let (mut client, server) = duplex(64 * 1024);
+        write_frame(&mut client, &exec_stdin_request("exec-1", "run"))
+            .await
+            .unwrap();
+        let handler = tokio::spawn(handle_client(
+            server,
+            session.clone(),
+            Arc::new(Semaphore::new(0)),
+            false,
+        ));
+        let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(response, DaemonResponse::Ok);
+
+        for _ in 0..64 {
+            write_frame(&mut client, &stdin_frame(&[7; 16 * 1024]))
+                .await
+                .expect("input the process no longer reads must still be accepted");
+        }
+        write_frame(&mut client, &stdin_frame(b"")).await.unwrap();
+
+        timeout(Duration::from_secs(5), handler)
+            .await
+            .expect("end-of-file ends the connection")
+            .unwrap()
+            .unwrap();
+        assert!(
+            !cancellation.load(Ordering::Acquire),
+            "a process that stops reading must not be cancelled"
+        );
+        drop(source.run_alive);
+        session.shutdown().await.unwrap();
     }
 
     #[tokio::test]

@@ -350,7 +350,7 @@ The session a sandbox joins is not a routing value, so it stays in the request b
 | provision-session | Load SDK, lease a store slot, `WslcCreateSession` with the requested sizing on a thread of its own, then validate the session with a store probe. Returns the minted `sessionId`. |
 | provision | Load SDK, ensure the session (`WslcCreateSession` on first use when none was named), resolve/import image, `WslcCreateContainer` with a keepalive init process (so the container survives across separate `exec` phases). The container is created **not started** (`started: false`). |
 | start | `WslcStartContainer` — starts the container minted at provision-time (the keepalive init keeps it warm across later `exec` phases); marks it `started`. |
-| exec | `WslcCreateContainerProcess` in the warm container; stream stdout/stderr and return the process exit code. Stdin is forwarded when the caller supplies it (see [exec stdin](#exec-stdin)). A timeout or caller cancellation SIGKILLs the **process**, not the container. |
+| exec | `WslcCreateContainerProcess` in the warm container; stream stdout/stderr and return the process exit code. Stdin is forwarded when the caller supplies it (see [exec stdin](#exec-stdin)). A timeout or caller cancellation SIGKILLs the **process**, not the container; a process that reads forwarded stdin is not signalled, and its container is quarantined instead. |
 | stop | `WslcStopContainer`. |
 | deprovision | `WslcDeleteContainer`. The session stays warm for the next provision and is released once nothing is using it (see [Session lifetime](#session-lifetime)). |
 | deprovision-session | Refuse while anything is still in the session, else terminate the VM and return its store slot. |
@@ -494,7 +494,8 @@ For `wxc-exec` CLI execution, a **successful** `exec` relays the script's raw st
 from daemon frames and exits with the script's own exit code — it does **not** wrap the result in
 a JSON result object. A CLI dispatch **failure** writes its `{error}` JSON object to stderr, because the
 script's output may already own stdout by the time the failure is known. In-process SDK execution
-uses the supported streaming APIs, which return separate stdin, stdout, and stderr pipes. Rust and
+uses the supported streaming APIs, which return separate stdout and stderr pipes, and a stdin
+pipe from the `WithStdin` variants. Rust and
 .NET SDKs do not expose attached exec as a public operation. A timeout on the
 CLI attached relay surfaces as a backend error because that path cannot return a typed timeout;
 the streaming path reports it through its wait result.
@@ -509,11 +510,12 @@ An exec reads the stdin its caller supplies:
   end-of-file at once, and the executor prints a warning to stderr. Interactive
   input is not supported; redirect stdin from a file or a pipe instead.
 
-- **SDK streaming exec** (`spawn_in_container` in Rust, `SpawnInContainer` in
-  .NET, `spawnInContainer` in Node). The returned process exposes a writable
-  stdin, and closing it gives the process end-of-file. Waiting on the process
-  also closes a stdin the caller did not take. The run-to-completion helpers
-  close stdin before they wait, so a command that reads stdin sees end-of-file.
+- **SDK streaming exec** (`spawn_in_container_with_stdin` in Rust,
+  `SpawnInContainerWithStdin` in .NET, `spawnInContainerWithStdin` in Node).
+  The returned process exposes a writable stdin, and closing it gives the
+  process end-of-file. A process started by `spawn_in_container` /
+  `SpawnInContainer` / `spawnInContainer`, or by a run-to-completion helper,
+  gets no stdin and reads end-of-file at once.
 
 Input is streamed rather than collected first, so a caller whose stdin never
 closes does not delay the start of the exec, and a command that never reads
@@ -524,9 +526,16 @@ A process that stops reading slows its sender instead of growing a buffer: the
 daemon queues at most 16 chunks of 64 KiB per exec and then stops reading from
 the client. Writes to the process run on a thread dedicated to that exec, so a
 backed-up stdin does not hold up other execs or lifecycle commands. A process
-that exits before reading all its input is not an error. Once the exec stops
-waiting on the process (it exits, times out, or is cancelled), its stdin is
-closed and input not yet written is dropped.
+that exits or closes its stdin before reading all its input is not an error:
+input it will not read is discarded, and the exec runs on. Once the process has
+exited, its stdin is closed and input not yet written is dropped.
+
+When an exec that forwards stdin times out or is cancelled before the client
+sends end-of-file, its process's stdin stays open, so the process never takes a
+cut-short input as complete. The daemon does not signal that process, because
+the WSLc SDK closes a process's stdin when it is signalled. The process is
+therefore never confirmed gone, and its stdin stays open until its container is
+quarantined and deleted, about a minute after the timeout or cancellation.
 
 A process that exits while a large amount of its input is still unread (more
 than the few hundred KiB the WSLc SDK buffers) completes late: the SDK reports
@@ -541,10 +550,10 @@ send, so a caller whose stdin stays open and silent holds no connection. The
 daemon accepts one such connection per exec, only for an exec that asked for
 stdin and only while its run lasts, and ends it when the run is over. Input
 that arrives after the run is over is dropped. If that connection cannot be
-made, or ends before the client
-sends end-of-file (a dropped connection, a failed read of the input, or a
-malformed frame), the exec is cancelled. Its stdin stays open until the
-cancellation lands, so the process never sees a truncated input as complete,
+made, or ends before the client sends end-of-file (a dropped connection, a
+failed read of the input, or a malformed frame), or the daemon fails to write
+the input to the process, the exec is cancelled. Its stdin stays open, as above,
+so the process never sees a truncated input as complete,
 and the caller gets an error saying stdin could not be forwarded. A caller that
 kills the exec itself gets the ordinary killed result instead.
 
@@ -575,8 +584,9 @@ Three conditions surface as `busy`, and all reach an SDK caller as
 | The named container already has an exec in flight | `sandbox <id> already has an exec in flight` | Succeeds once that container's run finishes |
 | Every client slot is occupied and the request is neither a cancellation nor an exec's stdin | `WSLc daemon client capacity is exhausted` | Succeeds once any client disconnects |
 
-Up to eight additional control connections can be serviced while every exec slot
-is occupied. Beyond that, a connection is admitted only to cancel an exec or to
+While every exec slot is occupied, the daemon still services one stdin
+connection per exec plus eight further control connections for lifecycle work.
+Beyond that, a connection is admitted only to cancel an exec or to
 carry its stdin, with room for one of each per exec. Neither request waits on
 the worker: cancellation is the only way to end a run with no timeout, and an
 exec whose stdin connection is refused is cancelled, so they keep capacity of
