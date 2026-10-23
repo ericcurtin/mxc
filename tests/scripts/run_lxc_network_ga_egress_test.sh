@@ -403,7 +403,13 @@ print(json.dumps({
 PY
 
 run_case "io_uring case: peer allowed on protocol icmp, echo sent from raw and packet sockets opened through io_uring" "$IO_URING_CONFIG"
-assert_blocked "an echo from a raw or packet socket opened through io_uring reached the peer. io_uring hands the workload the sockets the capability drop takes away."
+# Hosts such as RHEL 10 disable io_uring, so the probe cannot open a ring at all.
+IO_URING_DISABLED="$(cat /proc/sys/kernel/io_uring_disabled 2>/dev/null || echo 0)"
+if [ "$IO_URING_DISABLED" != 0 ] && echo "$CASE_OUTPUT" | grep -Eq "^MXC_IO_URING_SETUP_FAILED errno=1$"; then
+    echo "io_uring case: host sets kernel.io_uring_disabled=$IO_URING_DISABLED, so the workload cannot open io_uring sockets."
+else
+    assert_blocked "an echo from a raw or packet socket opened through io_uring reached the peer. io_uring hands the workload the sockets the capability drop takes away."
+fi
 
 run_case "port-range case: peer allowed on tcp/440-445, probe tcp/443" "$PORT_RANGE_INSIDE_CONFIG"
 assert_allowed "a port inside the allowed range 440-445 was unreachable. endPort is not reaching the chain, so a range selector blocks the traffic it was written to permit."
