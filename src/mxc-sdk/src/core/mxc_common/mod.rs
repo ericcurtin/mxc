@@ -68,8 +68,6 @@ pub mod system_dir;
 // Unix-specific modules (shared by the Seatbelt and Bubblewrap backends).
 #[cfg(unix)]
 pub mod interruptible_reader;
-#[cfg(unix)]
-pub(crate) mod unix_io;
 
 // Linux-only: used by the backends that realise filesystem policy as bind
 // mounts, which must resolve a destination before mounting over it.
