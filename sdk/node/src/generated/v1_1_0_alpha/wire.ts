@@ -233,6 +233,22 @@ export interface IsolationSessionProvisionRequest {
 }
 
 /**
+ * Kata backend settings.
+ */
+export interface Kata {
+  /**
+   * Hypervisor to run. Defaults to the host's `MXC_KATA_HYPERVISOR` setting, then `qemu`.
+   */
+  hypervisor?: KataHypervisor;
+  /**
+   * Absolute host path of the guest root filesystem: a directory, or an ext4 image file. The backend never writes to it; changes live in a per-sandbox layer that is discarded on deprovision.
+   */
+  rootfs: string;
+}
+
+export type KataHypervisor = "qemu" | "clh" | "cloud-hypervisor" | "firecracker" | "dragonball";
+
+/**
  * Container lifecycle settings.
  */
 export interface Lifecycle {
@@ -358,7 +374,7 @@ export interface NetworkRule {
 
 export type NonEmptyString = string;
 
-export type OneShotContainment = "process" | "processcontainer" | "lxc" | "bubblewrap" | "seatbelt" | "vm" | "windows_sandbox" | "microvm" | "hyperlight" | "wslc" | "isolation_session";
+export type OneShotContainment = "process" | "processcontainer" | "lxc" | "bubblewrap" | "seatbelt" | "vm" | "windows_sandbox" | "microvm" | "hyperlight" | "kata" | "wslc" | "isolation_session";
 
 /**
  * One-shot Hyperlight backend settings.
@@ -402,6 +418,10 @@ export interface OneShotRequest {
    * Optional one-shot Hyperlight backend settings.
    */
   hyperlight?: OneShotHyperlight;
+  /**
+   * Optional Kata backend settings.
+   */
+  kata?: Kata;
   /**
    * Optional lifecycle settings.
    */

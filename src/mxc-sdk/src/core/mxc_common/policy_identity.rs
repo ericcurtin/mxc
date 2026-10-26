@@ -242,6 +242,7 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         seatbelt,
         windows_sandbox,
         hyperlight,
+        kata,
         // Telemetry settings do not affect enforcement.
         telemetry: _excluded_telemetry,
         // A placeholder feature with no enforcement effect.
@@ -323,6 +324,15 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         root.insert(
             "hyperlight".into(),
             serde_json::to_value(hyperlight.clone().unwrap_or_default()).unwrap_or(Value::Null),
+        );
+    }
+    // The guest root filesystem and the hypervisor decide what the workload
+    // runs on. Hashed as written for the Kata backend only. An omitted
+    // hypervisor stays omitted because its default comes from the host.
+    if *containment == crate::mxc_common::models::ContainmentBackend::Kata {
+        root.insert(
+            "kata".into(),
+            serde_json::to_value(kata).unwrap_or(Value::Null),
         );
     }
 
@@ -780,6 +790,7 @@ mod tests {
             ContainmentBackend::IsolationSession,
             ContainmentBackend::Seatbelt,
             ContainmentBackend::Bubblewrap,
+            ContainmentBackend::Kata,
         ] {
             let mut changed = request();
             changed.containment = backend;

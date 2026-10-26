@@ -213,6 +213,9 @@ fn resolve_runner_inner_windows(
         ContainmentBackend::Bubblewrap => Err(MxcError::unsupported_containment(
             "Bubblewrap backend not available on Windows",
         )),
+        ContainmentBackend::Kata => Err(MxcError::unsupported_containment(
+            "Kata backend is only available on Linux",
+        )),
         ContainmentBackend::Seatbelt => Err(MxcError::unsupported_containment(
             "Seatbelt backend is only available on macOS (use mxc-exec-mac)",
         )),

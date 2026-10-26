@@ -8,8 +8,9 @@ use crate::mxc_common::error::WxcError;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
-    ExecutionRequest, HyperlightConfig, LifecycleConfig, LxcConfig, PortMapping, SeatbeltConfig,
-    TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    ExecutionRequest, HyperlightConfig, KataConfig, LifecycleConfig, LxcConfig, PortMapping,
+    SeatbeltConfig, TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig,
+    WslcConfig,
 };
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::network_parser::{parse_network_policy, NetworkSections};
@@ -1196,6 +1197,9 @@ fn present_backend_sections(
     if cfg.hyperlight.is_some() {
         push(ContainmentBackend::Hyperlight);
     }
+    if cfg.kata.is_some() {
+        push(ContainmentBackend::Kata);
+    }
     sections
 }
 
@@ -1287,6 +1291,7 @@ fn requested_sandbox_kind(c: Option<&wire::Containment>) -> &'static str {
         Some(wire::Containment::Seatbelt) => "seatbelt",
         Some(wire::Containment::IsolationSession) => "isolation_session",
         Some(wire::Containment::Bubblewrap) => "bubblewrap",
+        Some(wire::Containment::Kata) => "kata",
     }
 }
 
@@ -1651,6 +1656,11 @@ fn normalize_common_request_ir(
         runtime: h.runtime.unwrap_or_default(),
     });
 
+    let kata = cfg.kata.map(|k| KataConfig {
+        rootfs: k.rootfs.unwrap_or_default(),
+        hypervisor: k.hypervisor,
+    });
+
     let seatbelt = cfg.seatbelt.map(make_seatbelt_config);
     let telemetry = cfg.telemetry.map(|raw| TelemetryConfig {
         enabled: raw.enabled,
@@ -1690,6 +1700,7 @@ fn normalize_common_request_ir(
         test_feature,
         windows_sandbox,
         hyperlight,
+        kata,
         experimental_enabled: false,
         dry_run: false,
     })
@@ -2234,6 +2245,72 @@ mod tests {
             }
             MxcRequest::StateAware(_) => panic!("expected one-shot request"),
         }
+    }
+
+    #[test]
+    fn kata_section_reaches_the_runtime_model_with_field_presence_preserved() {
+        use crate::mxc_common::models::KataHypervisor;
+
+        let parse = |kata: &str| {
+            let json = format!(
+                r#"{{
+                    "version": "1.1.0-alpha",
+                    "containment": "kata",
+                    "kata": {kata},
+                    "process": {{"commandLine": "uname -r"}}
+                }}"#
+            );
+            match parse_exact_for_test(&json).unwrap() {
+                MxcRequest::OneShot(request) => request,
+                MxcRequest::StateAware(_) => panic!("expected one-shot request"),
+            }
+        };
+
+        let explicit = parse(r#"{"rootfs": "/srv/alpine", "hypervisor": "cloud-hypervisor"}"#);
+        assert_eq!(explicit.containment, ContainmentBackend::Kata);
+        let kata = explicit.kata.expect("kata section");
+        assert_eq!(kata.rootfs, "/srv/alpine");
+        assert_eq!(kata.hypervisor, Some(KataHypervisor::Clh));
+
+        // The parser keeps an omitted hypervisor omitted: the host default
+        // belongs to the backend, not to parsing.
+        let omitted = parse(r#"{"rootfs": "/srv/alpine"}"#);
+        assert_eq!(omitted.kata.expect("kata section").hypervisor, None);
+    }
+
+    #[test]
+    fn kata_section_is_rejected_beside_another_containment() {
+        for containment in ["lxc", "bubblewrap", "hyperlight"] {
+            let json = format!(
+                r#"{{
+                    "version": "1.1.0-alpha",
+                    "containment": "{containment}",
+                    "kata": {{"rootfs": "/srv/alpine"}},
+                    "process": {{"commandLine": "echo"}}
+                }}"#
+            );
+            let error = match parse_exact_for_test(&json) {
+                Ok(_) => panic!("{containment}: a kata section must be rejected"),
+                Err(error) => error.message().to_string(),
+            };
+            assert!(error.contains("kata"), "{containment}: {error}");
+        }
+    }
+
+    #[test]
+    fn another_backend_section_is_rejected_beside_kata_containment() {
+        let json = r#"{
+            "version": "1.1.0-alpha",
+            "containment": "kata",
+            "kata": {"rootfs": "/srv/alpine"},
+            "lxc": {"distribution": "alpine", "release": "3.20"},
+            "process": {"commandLine": "echo"}
+        }"#;
+        let error = match parse_exact_for_test(json) {
+            Ok(_) => panic!("an lxc section beside kata must be rejected"),
+            Err(error) => error.message().to_string(),
+        };
+        assert!(error.contains("lxc"), "{error}");
     }
 
     struct DevelopmentStateAwareRootCase {

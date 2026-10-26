@@ -603,6 +603,63 @@
       ],
       "type": "object"
     },
+    "Kata": {
+      "additionalProperties": false,
+      "description": "Kata backend settings.",
+      "properties": {
+        "hypervisor": {
+          "$ref": "#/definitions/KataHypervisor",
+          "description": "Hypervisor to run. Defaults to the host's `MXC_KATA_HYPERVISOR` setting, then `qemu`."
+        },
+        "rootfs": {
+          "description": "Absolute host path of the guest root filesystem: a directory, or an ext4 image file. The backend never writes to it; changes live in a per-sandbox layer that is discarded on deprovision.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rootfs"
+      ],
+      "type": "object"
+    },
+    "KataHypervisor": {
+      "oneOf": [
+        {
+          "description": "Qemu",
+          "enum": [
+            "qemu"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Clh",
+          "enum": [
+            "clh"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Clh",
+          "enum": [
+            "cloud-hypervisor"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Firecracker",
+          "enum": [
+            "firecracker"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Dragonball",
+          "enum": [
+            "dragonball"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "Lifecycle": {
       "additionalProperties": false,
       "description": "Container lifecycle settings.",
@@ -879,6 +936,13 @@
           "type": "string"
         },
         {
+          "description": "Kata",
+          "enum": [
+            "kata"
+          ],
+          "type": "string"
+        },
+        {
           "description": "Wslc",
           "enum": [
             "wslc"
@@ -935,6 +999,10 @@
         "hyperlight": {
           "$ref": "#/definitions/OneShotHyperlight",
           "description": "Optional one-shot Hyperlight backend settings."
+        },
+        "kata": {
+          "$ref": "#/definitions/Kata",
+          "description": "Optional Kata backend settings."
         },
         "lifecycle": {
           "$ref": "#/definitions/Lifecycle",

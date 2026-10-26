@@ -307,6 +307,7 @@ mod tests {
             "seatbelt",
             "macos_sandbox",
             "isolation_session",
+            "kata",
         ] {
             let wire = wire::Containment::parse_wire_name(spelling).unwrap();
             let json = format!(r#"{{"containment":"{spelling}"}}"#);
