@@ -32,6 +32,12 @@
     always have Scope ThisFolder, including zero-rights rows when no applicable
     grant exists.
 
+    With -IgnoreEmpty, summary excludes directories confirmed to have no entries,
+    including hidden/system entries. Subtree then covers only the included
+    directories; IgnoredEmptyFolderCount records empty directories excluded
+    beneath that subtree. Their own permissions and any future contents are not
+    covered. Unreadable directories are never assumed empty.
+
     This inventories rights through the selected package group, not effective
     access for an application. Other principals (including their deny entries),
     integrity levels, the user's rights, and the application's token can affect
@@ -66,6 +72,10 @@
 .PARAMETER NoRecurse
     Inspects only the specified roots, without enumerating their subdirectories.
 
+.PARAMETER IgnoreEmpty
+    With -Summary, omits confirmed empty directories from output and subtree
+    comparisons. Such directories can still have different ACLs.
+
 .EXAMPLE
     .\scripts\get-app-package-folder-access.ps1 |
         Export-Csv -LiteralPath .\app-package-folder-access.csv -NoTypeInformation -Encoding UTF8
@@ -85,6 +95,9 @@
 .EXAMPLE
     .\scripts\get-app-package-folder-access.ps1 -Path C:\Windows -Summary `
         -Principal ALL_RESTRICTED_APPLICATION_PACKAGES
+
+.EXAMPLE
+    .\scripts\get-app-package-folder-access.ps1 -Path C:\Windows\WinSxS -Summary -IgnoreEmpty
 #>
 
 [CmdletBinding(DefaultParameterSetName = 'Detailed')]
@@ -103,7 +116,10 @@ param(
     [ValidateSet('ALL_APPLICATION_PACKAGES', 'ALL_RESTRICTED_APPLICATION_PACKAGES')]
     [string]$Principal = 'ALL_APPLICATION_PACKAGES',
 
-    [switch]$NoRecurse
+    [switch]$NoRecurse,
+
+    [Parameter(ParameterSetName = 'Summary')]
+    [switch]$IgnoreEmpty
 )
 
 Set-StrictMode -Version 2.0
@@ -135,15 +151,16 @@ function New-ScanFrame {
     param([IO.DirectoryInfo]$Directory, $Parent)
 
     [pscustomobject]@{
-        Directory = $Directory
-        Parent    = $Parent
-        Ready     = $false
-        AclKnown  = $false
-        Uniform   = $true
-        Allowed   = 0L
-        Denied    = 0L
-        Count     = 1
-        Rows      = [Collections.Generic.List[object]]::new()
+        Directory               = $Directory
+        Parent                  = $Parent
+        Ready                   = $false
+        AclKnown                = $false
+        Uniform                 = $true
+        Allowed                 = 0L
+        Denied                  = 0L
+        Count                   = 1
+        IgnoredEmptyFolderCount = 0
+        Rows                    = [Collections.Generic.List[object]]::new()
     }
 }
 
@@ -154,25 +171,30 @@ function New-FolderAccessSummary {
         [long]$Allowed = 0,
         [long]$Denied = 0,
         [int]$Count = 0,
+        [int]$IgnoredEmptyFolderCount = 0,
         [string]$Note
     )
 
     $known = $Scope -ne 'Unknown'
+    if ($IgnoredEmptyFolderCount -gt 0) {
+        $Note = "Excludes $IgnoredEmptyFolderCount confirmed empty directories and their permissions."
+    }
     [pscustomobject][ordered]@{
-        Path             = $DirectoryPath
-        Principal        = $Principal
-        SID              = $summarySid
-        Scope            = $Scope
-        Rights           = if (-not $known) { $null } elseif ($Allowed) {
+        Path                    = $DirectoryPath
+        Principal               = $Principal
+        SID                     = $summarySid
+        Scope                   = $Scope
+        Rights                  = if (-not $known) { $null } elseif ($Allowed) {
             ([Security.AccessControl.FileSystemRights]$Allowed).ToString()
         } else { 'None' }
-        AccessMask       = if ($known) { '0x{0:X8}' -f $Allowed } else { $null }
-        DeniedRights     = if (-not $known) { $null } elseif ($Denied) {
+        AccessMask              = if ($known) { '0x{0:X8}' -f $Allowed } else { $null }
+        DeniedRights            = if (-not $known) { $null } elseif ($Denied) {
             ([Security.AccessControl.FileSystemRights]$Denied).ToString()
         } else { 'None' }
-        DeniedAccessMask = if ($known) { '0x{0:X8}' -f $Denied } else { $null }
-        FolderCount      = if ($known) { $Count } else { $null }
-        Note             = $Note
+        DeniedAccessMask        = if ($known) { '0x{0:X8}' -f $Denied } else { $null }
+        FolderCount             = if ($known) { $Count } else { $null }
+        IgnoredEmptyFolderCount = if ($known) { $IgnoredEmptyFolderCount } else { $null }
+        Note                    = $Note
     }
 }
 
@@ -211,6 +233,7 @@ $failureCount = 0
 $folderCount = 0
 $entryCount = 0
 $skippedReparsePoints = 0
+$ignoredEmptyFolders = 0
 
 foreach ($root in $Path) {
     try {
@@ -241,7 +264,8 @@ try {
                 $frame.Rows.Clear()
                 if ($frame.Allowed) {
                     $frame.Rows.Add((New-FolderAccessSummary -DirectoryPath $directory.FullName `
-                        -Scope Subtree -Allowed $frame.Allowed -Denied $frame.Denied -Count $frame.Count))
+                        -Scope Subtree -Allowed $frame.Allowed -Denied $frame.Denied -Count $frame.Count `
+                        -IgnoredEmptyFolderCount $frame.IgnoredEmptyFolderCount))
                 }
             }
             elseif ($frame.AclKnown -and ($frame.Allowed -or $NoRecurse)) {
@@ -251,6 +275,7 @@ try {
 
             if ($null -ne $frame.Parent) {
                 $frame.Parent.Count += $frame.Count
+                $frame.Parent.IgnoredEmptyFolderCount += $frame.IgnoredEmptyFolderCount
                 if (-not $frame.Uniform -or $frame.Allowed -ne $frame.Parent.Allowed -or
                     $frame.Denied -ne $frame.Parent.Denied) {
                     $frame.Parent.Uniform = $false
@@ -270,6 +295,31 @@ try {
             Write-Progress -Activity 'Inspecting application-package folder permissions' `
                 -Status "$folderCount folders; $entryCount matching entries; $failureCount errors" `
                 -CurrentOperation $directory.FullName
+        }
+
+        $emptyCheckFailed = $false
+        if ($IgnoreEmpty) {
+            try {
+                $firstEntry = @(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction Stop |
+                    Select-Object -First 1)
+                if ($firstEntry.Count -eq 0) {
+                    $ignoredEmptyFolders++
+                    if ($null -ne $frame.Parent) {
+                        $frame.Parent.IgnoredEmptyFolderCount++
+                    }
+                    Write-Verbose "Ignoring confirmed empty directory '$($directory.FullName)'."
+                    continue
+                }
+            }
+            catch {
+                $failureCount++
+                Write-Error -Message "Cannot inspect contents of '$($directory.FullName)': $($_.Exception.Message)" `
+                    -Category ReadError -TargetObject $directory.FullName
+                $emptyCheckFailed = $true
+                $frame.Uniform = $false
+                $frame.Rows.Add((New-FolderAccessSummary -DirectoryPath $directory.FullName `
+                    -Scope Unknown -Note 'Cannot determine whether this directory is empty or inspect its subfolders.'))
+            }
         }
 
         try {
@@ -334,7 +384,7 @@ try {
             $frame.Ready = $true
             $pending.Push($frame)
         }
-        if ($NoRecurse) {
+        if ($NoRecurse -or $emptyCheckFailed) {
             $frame.Uniform = $false
             continue
         }
@@ -376,6 +426,9 @@ try {
 finally {
     Write-Progress -Activity 'Inspecting application-package folder permissions' -Completed
     Write-Verbose "Inspected $folderCount folders; found $entryCount matching ACL entries."
+    if ($IgnoreEmpty) {
+        Write-Verbose "Ignored $ignoredEmptyFolders confirmed empty directories."
+    }
     if ($skippedReparsePoints -gt 0) {
         Write-Warning (
             "Did not descend into $skippedReparsePoints directory reparse points. " +

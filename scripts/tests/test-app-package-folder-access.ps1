@@ -339,6 +339,77 @@ try {
         $_.Status -eq 'NoApplicableGrant'
     }).Count -eq 2) 'Unreadable ACLs or skipped links were incorrectly reported as missing grants.'
 
+    $emptyRoot = (New-Item -Path (Join-Path $root 'empty-cases') -ItemType Directory).FullName
+    $content = (New-Item -Path (Join-Path $emptyRoot 'content') -ItemType Directory).FullName
+    $hiddenContent = (New-Item -Path (Join-Path $emptyRoot 'hidden-content') -ItemType Directory).FullName
+    $emptyAllowed = (New-Item -Path (Join-Path $emptyRoot 'empty-allowed') -ItemType Directory).FullName
+    $emptyDenied = (New-Item -Path (Join-Path $emptyRoot 'empty-denied') -ItemType Directory).FullName
+    $branch = (New-Item -Path (Join-Path $emptyRoot 'branch') -ItemType Directory).FullName
+    $emptyChild = (New-Item -Path (Join-Path $branch 'empty-child') -ItemType Directory).FullName
+    [void](New-Item -Path (Join-Path $content 'zero-length.txt') -ItemType File)
+    $hiddenEntry = New-Item -Path (Join-Path $hiddenContent 'hidden.txt') -ItemType File
+    $hiddenEntry.Attributes = $hiddenEntry.Attributes -bor [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::System
+    foreach ($directory in @($emptyRoot, $content, $hiddenContent, $emptyAllowed, $branch)) {
+        Set-TestAcl $directory "D:P(A;;GXGR;;;$allPackages)"
+    }
+    Set-TestAcl $emptyDenied 'D:P'
+    Set-TestAcl $emptyChild 'D:P'
+
+    $unfiltered = @(& $scanner -Path $emptyRoot -Summary -ErrorAction Stop)
+    Assert-True (@($unfiltered | Where-Object {
+        $_.Path -eq $emptyRoot -and $_.Scope -eq 'ThisFolder'
+    }).Count -eq 1) 'Empty folders were ignored without the opt-in flag.'
+
+    $filtered = @(& $scanner -Path $emptyRoot -Summary -IgnoreEmpty -ErrorAction Stop)
+    Assert-True ($filtered.Count -eq 1 -and $filtered[0].Path -eq $emptyRoot -and
+        $filtered[0].Scope -eq 'Subtree' -and $filtered[0].FolderCount -eq 4 -and
+        $filtered[0].IgnoredEmptyFolderCount -eq 3 -and $filtered[0].Note -like '*Excludes 3*') `
+        'Ignoring empty directories did not collapse the non-empty tree or disclose the excluded permissions.'
+    $emptyOnly = @(& $scanner -Path $emptyDenied -Summary -IgnoreEmpty -ErrorAction Stop)
+    Assert-True ($emptyOnly.Count -eq 0) 'A confirmed empty scan root was not ignored.'
+    $filteredOneLevel = @(& $scanner -Path $content -Summary -IgnoreEmpty -NoRecurse -ErrorAction Stop)
+    Assert-True ($filteredOneLevel.Count -eq 1 -and $filteredOneLevel[0].Scope -eq 'ThisFolder') `
+        'Ignoring empty directories made a nonrecursive result claim descendant coverage.'
+
+    $contentAcl = $testAcls[$content]
+    $testAcls.Remove($content)
+    $unknownContents = @(& $scanner -Path $emptyRoot -Summary -IgnoreEmpty `
+        -ErrorAction Continue 2>$null 3>$null)
+    $testAcls[$content] = $contentAcl
+    Assert-True (@($unknownContents | Where-Object {
+        $_.Path -eq $content -and $_.Scope -eq 'Unknown'
+    }).Count -eq 1 -and @($unknownContents | Where-Object {
+        $_.Path -eq $emptyRoot -and $_.Scope -eq 'Subtree'
+    }).Count -eq 0) 'Ignoring empty directories hid a non-empty folder with an unreadable ACL.'
+
+    $uninspectable = (New-Item -Path (Join-Path $emptyRoot 'uninspectable') -ItemType Directory).FullName
+    Set-TestAcl $uninspectable "D:P(A;;GXGR;;;$allPackages)"
+    $inspectionAttempts = [Collections.Generic.List[string]]::new()
+    function Get-ChildItem {
+        param([string]$LiteralPath, [switch]$Directory, [switch]$Force, $ErrorAction)
+        if ($LiteralPath -eq $uninspectable) {
+            $inspectionAttempts.Add($LiteralPath)
+            throw 'Simulated content-enumeration failure.'
+        }
+        Microsoft.PowerShell.Management\Get-ChildItem @PSBoundParameters
+        if ($LiteralPath -eq $emptyRoot -and $Directory) {
+            [pscustomobject]@{
+                FullName   = Join-Path $LiteralPath 'simulated-junction'
+                Attributes = [IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint
+            }
+        }
+    }
+    $unknownContents = @(& $scanner -Path $emptyRoot -Summary -IgnoreEmpty `
+        -ErrorAction Continue 2>$null 3>$null)
+    Remove-Item Function:\Get-ChildItem
+    Assert-True ($inspectionAttempts.Count -eq 1 -and @($unknownContents | Where-Object {
+        $_.Path -eq $uninspectable -and $_.Scope -eq 'Unknown'
+    }).Count -eq 1 -and @($unknownContents | Where-Object {
+        $_.Path -eq (Join-Path $emptyRoot 'simulated-junction') -and $_.Scope -eq 'Unknown'
+    }).Count -eq 1 -and @($unknownContents | Where-Object {
+        $_.Path -eq $emptyRoot -and $_.Scope -eq 'Subtree'
+    }).Count -eq 0) 'Unreadable contents or skipped reparse points were incorrectly treated as empty.'
+
     Write-Host 'Application-package folder permission checks passed.'
 }
 finally {
