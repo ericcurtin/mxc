@@ -187,7 +187,22 @@
           "then": {
             "else": {
               "else": {
-                "else": false,
+                "else": {
+                  "else": false,
+                  "if": {
+                    "properties": {
+                      "containment": {
+                        "const": "kata"
+                      }
+                    },
+                    "required": [
+                      "containment"
+                    ]
+                  },
+                  "then": {
+                    "$ref": "#/definitions/KataProvisionRequest"
+                  }
+                },
                 "if": {
                   "properties": {
                     "containment": {
@@ -621,6 +636,12 @@
       ],
       "type": "object"
     },
+    "KataContainment": {
+      "enum": [
+        "kata"
+      ],
+      "type": "string"
+    },
     "KataHypervisor": {
       "oneOf": [
         {
@@ -659,6 +680,54 @@
           "type": "string"
         }
       ]
+    },
+    "KataProvisionRequest": {
+      "additionalProperties": false,
+      "description": "A complete state-aware `provision` request for kata.\n\nFilesystem and network policy are fixed here and apply to every process the sandbox runs later. The Kata backend enforces only a deny-all network.",
+      "properties": {
+        "$schema": {
+          "description": "Optional JSON Schema reference for editor validation.",
+          "type": "string"
+        },
+        "_comment": {
+          "description": "Optional human-readable annotation ignored by the runtime."
+        },
+        "containment": {
+          "$ref": "#/definitions/KataContainment",
+          "description": "Exact `kata` containment marker."
+        },
+        "filesystem": {
+          "$ref": "#/definitions/Filesystem",
+          "description": "Optional filesystem policy."
+        },
+        "kata": {
+          "$ref": "#/definitions/Kata",
+          "description": "Guest root filesystem and hypervisor."
+        },
+        "network": {
+          "$ref": "#/definitions/Network",
+          "description": "Optional network policy."
+        },
+        "phase": {
+          "$ref": "#/definitions/ProvisionPhase",
+          "description": "Exact `provision` phase marker."
+        },
+        "telemetry": {
+          "$ref": "#/definitions/Telemetry",
+          "description": "Optional telemetry configuration."
+        },
+        "version": {
+          "$ref": "#/definitions/Version",
+          "description": "Exact development contract version."
+        }
+      },
+      "required": [
+        "containment",
+        "kata",
+        "phase",
+        "version"
+      ],
+      "type": "object"
     },
     "Lifecycle": {
       "additionalProperties": false,

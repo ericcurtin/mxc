@@ -334,6 +334,7 @@ mod tests {
             ("iso:abcd1234", ContainmentBackend::IsolationSession),
             ("wsb:abcd1234", ContainmentBackend::WindowsSandbox),
             ("wslc:abcd1234", ContainmentBackend::Wslc),
+            ("kata:abcd1234", ContainmentBackend::Kata),
         ] {
             let json = format!(r#"{{"phase":"exec","sandboxId":"{id}"}}"#);
             let source = CommandSource::parse(&json).unwrap();

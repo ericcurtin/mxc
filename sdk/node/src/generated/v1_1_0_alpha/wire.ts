@@ -246,7 +246,53 @@ export interface Kata {
   rootfs: string;
 }
 
+export type KataContainment = "kata";
+
 export type KataHypervisor = "qemu" | "clh" | "cloud-hypervisor" | "firecracker" | "dragonball";
+
+/**
+ * A complete state-aware `provision` request for kata.
+ *
+ * Filesystem and network policy are fixed here and apply to every process the sandbox runs later. The Kata backend enforces only a deny-all network.
+ */
+export interface KataProvisionRequest {
+  /**
+   * Optional JSON Schema reference for editor validation.
+   */
+  $schema?: string;
+  /**
+   * Optional human-readable annotation ignored by the runtime.
+   */
+  _comment?: unknown;
+  /**
+   * Exact `kata` containment marker.
+   */
+  containment: KataContainment;
+  /**
+   * Optional filesystem policy.
+   */
+  filesystem?: Filesystem;
+  /**
+   * Guest root filesystem and hypervisor.
+   */
+  kata: Kata;
+  /**
+   * Optional network policy.
+   */
+  network?: Network;
+  /**
+   * Exact `provision` phase marker.
+   */
+  phase: ProvisionPhase;
+  /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
+  /**
+   * Exact development contract version.
+   */
+  version: Version;
+}
 
 /**
  * Container lifecycle settings.
@@ -999,4 +1045,4 @@ export interface WslcProvisionSessionRequest {
 /**
  * Exact mutable MXC development configuration contract.
  */
-export type MXCConfiguration = OneShotRequest | WslcDeprovisionSessionRequest | DeprovisionRequest | StopRequest | ExecRequest | StartRequest | WslcProvisionRequest | IsolationSessionProvisionRequest | WindowsSandboxProvisionRequest | WslcProvisionSessionRequest;
+export type MXCConfiguration = OneShotRequest | WslcDeprovisionSessionRequest | DeprovisionRequest | StopRequest | ExecRequest | StartRequest | KataProvisionRequest | WslcProvisionRequest | IsolationSessionProvisionRequest | WindowsSandboxProvisionRequest | WslcProvisionSessionRequest;

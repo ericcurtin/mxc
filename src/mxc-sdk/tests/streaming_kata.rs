@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 //! Kata backend tests: streaming create-and-run execution, filesystem and
-//! network policy, timeouts, kill, cleanup, and recovery from a killed request,
-//! on every hypervisor the host is set up for.
+//! network policy, timeouts, the container lifecycle, and cleanup, on every
+//! hypervisor the host is set up for.
 //!
 //! Linux-gated. The rejection tests need no Kata install and always run. The
 //! live tests boot real microVMs, so they need root, `/dev/kvm`, a Kata
@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use mxc_sdk::__ffi::spawn_container_json;
+use mxc_sdk::__ffi::{execute_lifecycle_json, run_lifecycle_json, spawn_container_json};
 use mxc_sdk::v1::{Error, ErrorCode, WaitResult};
 use serde_json::{json, Value};
 
@@ -328,6 +328,37 @@ fn kata_refuses_what_it_cannot_enforce_before_creating_anything() {
         !Path::new("/run/mxc-kata").exists()
             || std::fs::read_dir("/run/mxc-kata").map_or(true, |mut e| e.next().is_none()),
         "a refused request left a sandbox directory"
+    );
+}
+
+#[test]
+fn kata_lifecycle_refuses_unknown_and_malformed_sandboxes() {
+    let stale = run_lifecycle_json(
+        r#"{"version":"1.1.0-alpha","phase":"stop","sandboxId":"kata:0a1b2c3d"}"#,
+        false,
+        true,
+    )
+    .expect_err("an unknown sandbox cannot be stopped");
+    assert_eq!(stale.code, ErrorCode::StaleId, "{stale:?}");
+
+    let malformed = run_lifecycle_json(
+        r#"{"version":"1.1.0-alpha","phase":"stop","sandboxId":"kata:../../etc"}"#,
+        false,
+        true,
+    )
+    .expect_err("a path is not a sandbox id");
+    assert_eq!(malformed.code, ErrorCode::MalformedId, "{malformed:?}");
+
+    let not_opted_in = run_lifecycle_json(
+        r#"{"version":"1.1.0-alpha","phase":"stop","sandboxId":"kata:0a1b2c3d"}"#,
+        false,
+        false,
+    )
+    .expect_err("experimental backends need the opt-in");
+    assert_eq!(
+        not_opted_in.code,
+        ErrorCode::BackendUnavailable,
+        "{not_opted_in:?}"
     );
 }
 
@@ -710,4 +741,161 @@ fn kata_reclaims_a_sandbox_left_by_a_killed_request() {
         assert_eq!(outcome, WaitResult::Exited(0), "{hypervisor}: {err}");
         assert_nothing_left(&live);
     }
+}
+
+// --- The container lifecycle ----------------------------------------------------
+
+fn lifecycle(request: Value) -> Result<Value, Error> {
+    run_lifecycle_json(&request.to_string(), false, true)
+        .map(|text| serde_json::from_str(&text).expect("the envelope is JSON"))
+}
+
+fn exec_in(sandbox_id: &str, command: &str, timeout_ms: Option<u32>) -> (WaitResult, String) {
+    let mut process = json!({"commandLine": command});
+    if let Some(timeout) = timeout_ms {
+        process["timeout"] = json!(timeout);
+    }
+    let request = json!({"version": "1.1.0-alpha", "phase": "exec",
+                         "sandboxId": sandbox_id, "process": process});
+    let mut handle = execute_lifecycle_json(&request.to_string(), true)
+        .unwrap_or_else(|e| panic!("exec was refused: {e:?}"));
+    let mut stdout = handle.take_stdout().expect("stdout");
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        stdout.read_to_string(&mut text).unwrap();
+        text
+    });
+    let outcome = handle.wait().expect("exec is waited for");
+    let out = reader.join().unwrap();
+    (outcome, out)
+}
+
+/// Releases a sandbox when a test fails part way, so one failure does not
+/// strand a VM and fail every test after it.
+struct ReleaseOnDrop(String);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        for phase in ["stop", "deprovision"] {
+            let _ =
+                lifecycle(json!({"version": "1.1.0-alpha", "phase": phase, "sandboxId": self.0}));
+        }
+    }
+}
+
+#[test]
+fn kata_runs_the_container_lifecycle_and_keeps_the_writable_layer_across_a_restart() {
+    for hypervisor in hypervisors() {
+        let _guard = exclusive();
+        let Some(live) = live(&hypervisor) else {
+            continue;
+        };
+        println!("== {hypervisor}: lifecycle");
+
+        let provisioned = lifecycle(json!({
+            "version": "1.1.0-alpha", "phase": "provision", "containment": "kata",
+            "kata": kata_section(&live),
+            "network": {"egress": {"default": "deny"}},
+        }))
+        .expect("provision succeeds");
+        let sandbox_id = provisioned["result"]["sandboxId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no sandboxId in {provisioned}"))
+            .to_string();
+        assert!(sandbox_id.starts_with("kata:"), "{sandbox_id}");
+        let _release = ReleaseOnDrop(sandbox_id.clone());
+
+        // Provisioned means resources are held but no VM runs.
+        let error = execute_lifecycle_json(
+            &json!({"version": "1.1.0-alpha", "phase": "exec", "sandboxId": sandbox_id,
+                    "process": {"commandLine": "true"}})
+            .to_string(),
+            true,
+        )
+        .err()
+        .expect("exec needs a started sandbox");
+        assert_eq!(error.code, ErrorCode::NotStarted, "{error:?}");
+
+        lifecycle(json!({"version": "1.1.0-alpha", "phase": "start", "sandboxId": sandbox_id}))
+            .expect("start succeeds");
+        let again =
+            lifecycle(json!({"version": "1.1.0-alpha", "phase": "start", "sandboxId": sandbox_id}))
+                .expect_err("a running sandbox cannot be started");
+        assert_eq!(again.code, ErrorCode::AlreadyStarted, "{again:?}");
+
+        let (outcome, out) = exec_in(
+            &sandbox_id,
+            "uname -r; echo kept > /root/marker; ls /sys/class/net",
+            None,
+        );
+        assert_eq!(outcome, WaitResult::Exited(0), "{hypervisor}: {out:?}");
+        let mut lines = out.lines();
+        assert_ne!(
+            lines.next().unwrap_or_default(),
+            host_kernel(),
+            "{hypervisor}"
+        );
+        assert_eq!(lines.next(), Some("lo"), "{hypervisor}");
+
+        // Processes in one sandbox share its state; a timeout ends only its own.
+        let (outcome, _) = exec_in(&sandbox_id, "sleep 600", Some(2000));
+        assert_eq!(outcome, WaitResult::TimedOut, "{hypervisor}");
+        let (outcome, out) = exec_in(&sandbox_id, "cat /root/marker", None);
+        assert_eq!(outcome, WaitResult::Exited(0), "{hypervisor}");
+        assert_eq!(out.trim(), "kept", "{hypervisor}");
+
+        lifecycle(json!({"version": "1.1.0-alpha", "phase": "stop", "sandboxId": sandbox_id}))
+            .expect("stop succeeds");
+        let stopped =
+            lifecycle(json!({"version": "1.1.0-alpha", "phase": "stop", "sandboxId": sandbox_id}))
+                .expect_err("a stopped sandbox cannot be stopped again");
+        assert_eq!(stopped.code, ErrorCode::AlreadyStopped, "{stopped:?}");
+
+        // A provisioned sandbox keeps its writable layer, so a restart sees it.
+        lifecycle(json!({"version": "1.1.0-alpha", "phase": "start", "sandboxId": sandbox_id}))
+            .expect("restart succeeds");
+        let (outcome, out) = exec_in(&sandbox_id, "cat /root/marker", None);
+        assert_eq!(outcome, WaitResult::Exited(0), "{hypervisor}");
+        assert_eq!(
+            out.trim(),
+            "kept",
+            "{hypervisor}: the layer was lost across a restart"
+        );
+
+        // A running sandbox must be stopped before it is released.
+        let running = lifecycle(
+            json!({"version": "1.1.0-alpha", "phase": "deprovision", "sandboxId": sandbox_id}),
+        )
+        .expect_err("a running sandbox cannot be deprovisioned");
+        assert_eq!(running.code, ErrorCode::AlreadyStarted, "{running:?}");
+
+        lifecycle(json!({"version": "1.1.0-alpha", "phase": "stop", "sandboxId": sandbox_id}))
+            .expect("stop succeeds");
+        lifecycle(json!({"version": "1.1.0-alpha", "phase": "deprovision",
+                         "sandboxId": sandbox_id}))
+        .expect("deprovision succeeds");
+        let gone =
+            lifecycle(json!({"version": "1.1.0-alpha", "phase": "start", "sandboxId": sandbox_id}))
+                .expect_err("a deprovisioned sandbox is gone");
+        assert_eq!(gone.code, ErrorCode::StaleId, "{gone:?}");
+
+        assert_nothing_left(&live);
+    }
+}
+
+#[test]
+fn kata_lifecycle_enforces_policy_fixed_at_provision() {
+    let _guard = exclusive();
+    let Some(live) = live(hypervisors().first().map(String::as_str).unwrap_or("qemu")) else {
+        return;
+    };
+    // The hypervisor is irrelevant to a request refused before a VM exists.
+    let refused = lifecycle(json!({
+        "version": "1.1.0-alpha", "phase": "provision", "containment": "kata",
+        "kata": kata_section(&live),
+        "network": {"egress": {"default": "allow"}},
+    }))
+    .expect_err("allow-all egress cannot be enforced");
+    assert_eq!(refused.code, ErrorCode::PolicyValidation, "{refused:?}");
+    assert_nothing_left(&live);
 }

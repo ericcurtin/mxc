@@ -259,6 +259,7 @@ pub use state_aware::{
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
     IsolationSessionProvisionRequest, StateAwareIsolationSession,
 };
+pub use state_aware::{KataContainment, KataProvisionRequest};
 pub use state_aware::{ProvisionPhase, ProvisionRequest};
 pub use state_aware::{
     ProvisionSessionPhase, StateAwareWslcSession, WslcProvisionSession, WslcProvisionSessionRequest,

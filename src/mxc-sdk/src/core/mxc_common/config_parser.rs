@@ -9,8 +9,7 @@ use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
     ExecutionRequest, HyperlightConfig, KataConfig, LifecycleConfig, LxcConfig, PortMapping,
-    SeatbeltConfig, TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig,
-    WslcConfig,
+    SeatbeltConfig, TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::network_parser::{parse_network_policy, NetworkSections};
@@ -545,6 +544,10 @@ fn deserialize_development_request(
         }
         Some(Phase::Provision) => {
             let request = match dev::probe_containment(json).map_err(exact_containment_error)? {
+                Containment::Kata => {
+                    deserialize_development_root(json, "Kata provision", "1.1", true)
+                        .map(ProvisionRequest::Kata)
+                }
                 Containment::WindowsSandbox => {
                     deserialize_development_root(json, "Windows Sandbox provision", "1.1", true)
                         .map(ProvisionRequest::WindowsSandbox)
@@ -1274,6 +1277,7 @@ fn state_aware_containment_from_id(sandbox_id: &str) -> Option<wire::Containment
         "wslc" => Some(wire::Containment::Wslc),
         "wsb" => Some(wire::Containment::WindowsSandbox),
         "iso" => Some(wire::Containment::IsolationSession),
+        "kata" => Some(wire::Containment::Kata),
         _ => None,
     }
 }
@@ -1722,6 +1726,7 @@ fn normalize_state_aware(
                 | StateAwareOperation::DeprovisionSession { .. } => Some(wire::Containment::Wslc),
                 StateAwareOperation::Provision(provision) => Some(match provision {
                     StateAwareProvision::IsolationSession(_) => wire::Containment::IsolationSession,
+                    StateAwareProvision::Kata(_) => wire::Containment::Kata,
                     StateAwareProvision::WindowsSandbox => wire::Containment::WindowsSandbox,
                     StateAwareProvision::Wslc(_) => wire::Containment::Wslc,
                 }),
@@ -1904,6 +1909,7 @@ mod tests {
     #[derive(Debug, Clone, PartialEq)]
     enum ProvisionSnapshot {
         IsolationSession(Option<Option<String>>),
+        Kata(String),
         WindowsSandbox,
         Wslc(Option<(Option<String>, Option<String>)>),
     }
@@ -1923,6 +1929,9 @@ mod tests {
                                 ProvisionSnapshot::IsolationSession(
                                     config.as_ref().map(|config| config.app_id.clone()),
                                 )
+                            }
+                            StateAwareProvision::Kata(config) => {
+                                ProvisionSnapshot::Kata(config.rootfs.clone())
                             }
                             StateAwareProvision::WindowsSandbox => {
                                 ProvisionSnapshot::WindowsSandbox
@@ -2324,6 +2333,24 @@ mod tests {
     }
 
     const DEVELOPMENT_STATE_AWARE_ROOT_CASES: &[DevelopmentStateAwareRootCase] = &[
+        DevelopmentStateAwareRootCase {
+            name: "Kata provision",
+            json: r#"{"version":"1.1.0-alpha","phase":"provision","containment":"kata","kata":{"rootfs":"/srv/rootfs"}}"#,
+            expected_phase: Phase::Provision,
+            expected_declared_containment: Some(ContainmentBackend::Kata),
+            expected_runtime_containment: ContainmentBackend::Kata,
+            expected_sandbox_id: None,
+            expected_script: "",
+        },
+        DevelopmentStateAwareRootCase {
+            name: "Kata start",
+            json: r#"{"version":"1.1.0-alpha","phase":"start","sandboxId":"kata:0a1b2c3d"}"#,
+            expected_phase: Phase::Start,
+            expected_declared_containment: None,
+            expected_runtime_containment: ContainmentBackend::Kata,
+            expected_sandbox_id: Some("kata:0a1b2c3d"),
+            expected_script: "",
+        },
         DevelopmentStateAwareRootCase {
             name: "Windows Sandbox provision",
             json: r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,

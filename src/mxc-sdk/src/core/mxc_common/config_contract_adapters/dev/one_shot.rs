@@ -316,11 +316,8 @@ pub(super) fn into_common_request_ir(
     }
 }
 
-fn convert_kata(value: contract::Kata) -> wire::Kata {
-    let contract::Kata {
-        rootfs,
-        hypervisor,
-    } = value;
+pub(super) fn convert_kata(value: contract::Kata) -> wire::Kata {
+    let contract::Kata { rootfs, hypervisor } = value;
     wire::Kata {
         rootfs: Some(rootfs),
         hypervisor: hypervisor.into_option().map(|hypervisor| match hypervisor {

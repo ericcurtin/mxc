@@ -957,7 +957,7 @@ impl std::str::FromStr for KataHypervisor {
 }
 
 /// Kata backend configuration (`kata`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KataConfig {
     /// Host path of the guest root filesystem: a directory, or an ext4 image
