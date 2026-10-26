@@ -92,8 +92,9 @@ static BACKENDS: [BackendRegistration; 11] = [
         backend: ContainmentBackend::Kata,
         experimental: true,
         probe_coverage: ProbeCoverage::NotDetected(
-            "no host detector yet; the backend reports a missing Kata install or KVM when a \
-             sandbox is requested",
+            "the .NET and Node discovery enums do not name it yet, so a host detector would \
+             report a backend those SDKs cannot represent; the backend itself reports a missing \
+             Kata install, KVM, or root when a sandbox is requested",
         ),
     },
 ];

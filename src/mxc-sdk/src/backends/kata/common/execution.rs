@@ -1,0 +1,405 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! One process running in a started sandbox.
+//!
+//! The shim connects a process's standard streams to named pipes (FIFOs) whose
+//! paths are named in the `Exec` request. MXC creates the FIFOs and holds one
+//! end of each, so a stream carries data from the first byte and its end of
+//! file is the shim closing its side.
+
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use nix::sys::stat::Mode;
+use nix::unistd::mkfifo;
+use serde_json::Value;
+
+use crate::kata_common::error::KataError;
+use crate::kata_common::task_api::{self, ExecRequest, StdioPaths, TaskClient};
+
+/// How long a killed process may take to report its exit.
+const KILL_REPORT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Sends the shim a close-stdin request once, so the process sees end of file.
+/// The shim does not do this when the stdin FIFO is closed.
+struct StdinClose {
+    task: TaskClient,
+    task_id: String,
+    exec_id: String,
+    sent: AtomicBool,
+}
+
+impl StdinClose {
+    fn send(&self) {
+        if !self.sent.swap(true, Ordering::AcqRel) {
+            let _ = self.task.close_stdin(&self.task_id, &self.exec_id);
+        }
+    }
+}
+
+/// Writes to a process's standard input. Dropping it, or the process being
+/// waited on, delivers end of file.
+pub(crate) struct StdinWriter {
+    file: Option<File>,
+    close: Arc<StdinClose>,
+}
+
+impl std::fmt::Debug for StdinWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StdinWriter")
+            .field("open", &self.file.is_some())
+            .finish()
+    }
+}
+
+impl StdinWriter {
+    /// The FIFO's descriptor, for callers that duplicate it.
+    pub(crate) fn raw_fd(&self) -> Option<i32> {
+        use std::os::fd::AsRawFd;
+        self.file.as_ref().map(AsRawFd::as_raw_fd)
+    }
+}
+
+impl Write for StdinWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self.file.as_mut() {
+            Some(file) => file.write(buf),
+            None => Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "standard input is closed",
+            )),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self.file.as_mut() {
+            Some(file) => file.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for StdinWriter {
+    fn drop(&mut self) {
+        // Close the FIFO first so everything written is already delivered when
+        // the shim is told to end the stream.
+        self.file.take();
+        self.close.send();
+    }
+}
+
+/// How far a kill reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KillScope {
+    /// Only the process. Other processes in the sandbox keep running, so the
+    /// sandbox stays usable. A descendant that holds the process's output open
+    /// keeps the shim from reporting its exit until the descendant ends.
+    Process,
+    /// Every process in the sandbox. For a sandbox that exists only for this
+    /// process, so nothing can keep its output open.
+    Sandbox,
+}
+
+/// What it takes to kill a process, separate from the [`Execution`] that owns
+/// its streams, so a terminator can run while another thread waits.
+#[derive(Debug, Clone)]
+pub(crate) struct Killer {
+    task: TaskClient,
+    task_id: String,
+    exec_id: String,
+    scope: KillScope,
+}
+
+impl Killer {
+    /// Kills the process with SIGKILL, and with [`KillScope::Sandbox`] every
+    /// other process in the sandbox too. A process that already exited is not
+    /// an error.
+    pub(crate) fn kill(&self) -> Result<(), KataError> {
+        let killed = match self
+            .task
+            .kill(&self.task_id, &self.exec_id, task_api::SIGKILL, false)
+        {
+            Ok(()) => Ok(()),
+            Err(e) if e.is_not_found() => Ok(()),
+            Err(e) => Err(KataError::failed(format!("killing the process: {e}"))),
+        };
+        if self.scope == KillScope::Sandbox {
+            // Empty exec id: the sandbox's init process, with `all` set to
+            // signal every process in the container.
+            let _ = self.task.kill(&self.task_id, "", task_api::SIGKILL, true);
+        }
+        killed
+    }
+}
+
+/// How a wait ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExitOutcome {
+    /// The process exited with this code. A process killed by signal N reports
+    /// 128 + N.
+    Exited(i32),
+    /// The deadline passed and the process was killed.
+    TimedOut,
+}
+
+#[derive(Debug)]
+pub(crate) struct Execution {
+    task: TaskClient,
+    task_id: String,
+    exec_id: String,
+    scope: KillScope,
+    fifos: Vec<PathBuf>,
+    stdout: Option<OwnedFd>,
+    stderr: Option<OwnedFd>,
+    stdin: Option<StdinWriter>,
+    exit: Receiver<Result<i32, String>>,
+    /// The exit once seen, so repeated waits agree.
+    result: Option<Result<i32, String>>,
+    /// The process is known to be gone: it exited, or a timeout killed it.
+    gone: bool,
+    released: bool,
+}
+
+fn make_fifo(dir: &Path, name: &str) -> Result<PathBuf, KataError> {
+    let path = dir.join(name);
+    mkfifo(&path, Mode::from_bits_truncate(0o600))
+        .map_err(|e| KataError::failed(format!("cannot create {}: {e}", path.display())))?;
+    Ok(path)
+}
+
+fn open_read(path: &Path) -> io::Result<OwnedFd> {
+    // Non-blocking so the open does not wait for the shim to open its end. The
+    // kernel reports end of file only after a writer has connected and left, so
+    // a reader that starts early waits rather than seeing a false end.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)?;
+    Ok(file.into())
+}
+
+impl Execution {
+    /// Starts `process` (an OCI process) in the sandbox task `task_id`.
+    ///
+    /// `io_dir` must exist. `exec_id` must be unique within the task.
+    pub(crate) fn start(
+        task: &TaskClient,
+        task_id: &str,
+        exec_id: &str,
+        process: &Value,
+        io_dir: &Path,
+        scope: KillScope,
+    ) -> Result<Self, KataError> {
+        let mut fifos = Vec::new();
+        let result = Self::start_inner(task, task_id, exec_id, process, io_dir, scope, &mut fifos);
+        if result.is_err() {
+            for fifo in &fifos {
+                let _ = std::fs::remove_file(fifo);
+            }
+        }
+        result
+    }
+
+    fn start_inner(
+        task: &TaskClient,
+        task_id: &str,
+        exec_id: &str,
+        process: &Value,
+        io_dir: &Path,
+        scope: KillScope,
+        fifos: &mut Vec<PathBuf>,
+    ) -> Result<Self, KataError> {
+        let stdin_path = make_fifo(io_dir, &format!("{exec_id}.in"))?;
+        fifos.push(stdin_path.clone());
+        let stdout_path = make_fifo(io_dir, &format!("{exec_id}.out"))?;
+        fifos.push(stdout_path.clone());
+        let stderr_path = make_fifo(io_dir, &format!("{exec_id}.err"))?;
+        fifos.push(stderr_path.clone());
+
+        let io_error = |what: &str, e: io::Error| KataError::failed(format!("{what}: {e}"));
+        let stdout = open_read(&stdout_path).map_err(|e| io_error("opening stdout", e))?;
+        let stderr = open_read(&stderr_path).map_err(|e| io_error("opening stderr", e))?;
+        // Read-write so the open does not wait for the shim, and the write end
+        // stays valid until MXC closes it.
+        let stdin_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_CLOEXEC)
+            .open(&stdin_path)
+            .map_err(|e| io_error("opening stdin", e))?;
+
+        let spec = serde_json::to_vec(process)
+            .map_err(|e| KataError::failed(format!("encoding the process: {e}")))?;
+        task.exec(&ExecRequest {
+            id: task_id.to_string(),
+            exec_id: exec_id.to_string(),
+            stdio: StdioPaths {
+                stdin: stdin_path.display().to_string(),
+                stdout: stdout_path.display().to_string(),
+                stderr: stderr_path.display().to_string(),
+            },
+            spec: task_api::oci_process(spec),
+        })
+        .map_err(|e| KataError::failed(format!("the shim refused the process: {e}")))?;
+
+        if let Err(e) = task.start(task_id, exec_id) {
+            // Registered but not running: remove it so the shim keeps no entry.
+            let _ = task.delete(task_id, exec_id);
+            return Err(KataError::failed(format!("the process did not start: {e}")));
+        }
+
+        let (sender, exit) = mpsc::channel();
+        let waiter = task.clone();
+        let (wait_task_id, wait_exec_id) = (task_id.to_string(), exec_id.to_string());
+        std::thread::Builder::new()
+            .name("mxc-kata-wait".to_string())
+            .spawn(move || {
+                let status = waiter
+                    .wait(&wait_task_id, &wait_exec_id)
+                    .map(|code| code as i32)
+                    .map_err(|e| e.to_string());
+                let _ = sender.send(status);
+            })
+            .map_err(|e| KataError::failed(format!("cannot start the wait thread: {e}")))?;
+
+        Ok(Self {
+            task: task.clone(),
+            task_id: task_id.to_string(),
+            exec_id: exec_id.to_string(),
+            scope,
+            fifos: std::mem::take(fifos),
+            stdout: Some(stdout),
+            stderr: Some(stderr),
+            stdin: Some(StdinWriter {
+                file: Some(stdin_file),
+                close: Arc::new(StdinClose {
+                    task: task.clone(),
+                    task_id: task_id.to_string(),
+                    exec_id: exec_id.to_string(),
+                    sent: AtomicBool::new(false),
+                }),
+            }),
+            exit,
+            result: None,
+            gone: false,
+            released: false,
+        })
+    }
+
+    pub(crate) fn take_stdin(&mut self) -> Option<StdinWriter> {
+        self.stdin.take()
+    }
+
+    pub(crate) fn take_stdout(&mut self) -> Option<OwnedFd> {
+        self.stdout.take()
+    }
+
+    pub(crate) fn take_stderr(&mut self) -> Option<OwnedFd> {
+        self.stderr.take()
+    }
+
+    /// A cloneable handle that can kill this process while another thread
+    /// waits on it.
+    pub(crate) fn killer(&self) -> Killer {
+        Killer {
+            task: self.task.clone(),
+            task_id: self.task_id.clone(),
+            exec_id: self.exec_id.clone(),
+            scope: self.scope,
+        }
+    }
+
+    pub(crate) fn kill(&self) -> Result<(), KataError> {
+        self.killer().kill()
+    }
+
+    /// The exit if it has been reported, without waiting.
+    pub(crate) fn try_wait(&mut self) -> Result<Option<i32>, KataError> {
+        if self.result.is_none() {
+            match self.exit.try_recv() {
+                Ok(result) => self.result = Some(result),
+                Err(TryRecvError::Empty) => return Ok(None),
+                Err(TryRecvError::Disconnected) => {
+                    self.result = Some(Err("the wait thread ended without a result".to_string()))
+                }
+            }
+        }
+        self.gone = true;
+        self.exit_code().map(Some)
+    }
+
+    fn exit_code(&self) -> Result<i32, KataError> {
+        match self.result.as_ref().expect("result recorded") {
+            Ok(code) => Ok(*code),
+            Err(message) => Err(KataError::failed(format!(
+                "could not learn how the process ended: {message}"
+            ))),
+        }
+    }
+
+    /// Waits for the exit, killing the process if `deadline` passes first.
+    pub(crate) fn wait(&mut self, deadline: Option<Instant>) -> Result<ExitOutcome, KataError> {
+        if self.result.is_none() {
+            let received = match deadline {
+                None => self.exit.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                Some(deadline) => self
+                    .exit
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now())),
+            };
+            match received {
+                Ok(result) => self.result = Some(result),
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.result = Some(Err("the wait thread ended without a result".to_string()))
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    self.kill()?;
+                    match self.exit.recv_timeout(KILL_REPORT_TIMEOUT) {
+                        Ok(_) => self.gone = true,
+                        Err(_) => {
+                            return Err(KataError::failed(format!(
+                                "the process did not exit within {}s of SIGKILL",
+                                KILL_REPORT_TIMEOUT.as_secs()
+                            )))
+                        }
+                    }
+                    return Ok(ExitOutcome::TimedOut);
+                }
+            }
+        }
+        self.gone = true;
+        self.exit_code().map(ExitOutcome::Exited)
+    }
+
+    /// Removes the shim's record of the process and the FIFOs. Safe to repeat.
+    /// Call once the process has exited and its output has been read.
+    pub(crate) fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        // Dropping stdin first sends the close-stdin request while the process
+        // is still registered.
+        self.stdin.take();
+        let _ = self.task.delete(&self.task_id, &self.exec_id);
+        for fifo in &self.fifos {
+            let _ = std::fs::remove_file(fifo);
+        }
+    }
+}
+
+impl Drop for Execution {
+    fn drop(&mut self) {
+        if !self.gone {
+            let _ = self.kill();
+        }
+        self.release();
+    }
+}
