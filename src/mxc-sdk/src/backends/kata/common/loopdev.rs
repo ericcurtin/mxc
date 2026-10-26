@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 const LOOP_CONTROL: &str = "/dev/loop-control";
 const LOOP_SET_FD: libc::c_ulong = 0x4C00;
+const LOOP_CLR_FD: libc::c_ulong = 0x4C01;
 const LOOP_SET_STATUS64: libc::c_ulong = 0x4C04;
 const LOOP_CTL_GET_FREE: libc::c_ulong = 0x4C82;
 const LO_FLAGS_AUTOCLEAR: u32 = 4;
@@ -96,7 +97,21 @@ pub(crate) fn attach(image: &Path) -> io::Result<LoopDevice> {
             }
             return Err(error);
         }
-        set_autoclear(&device, image)?;
+        if let Err(error) = set_autoclear(&device, image) {
+            // Without autoclear, closing the descriptor leaves the image attached.
+            // SAFETY: LOOP_CLR_FD takes no argument.
+            if unsafe { libc::ioctl(device.as_raw_fd(), LOOP_CLR_FD) } < 0 {
+                let detach = io::Error::last_os_error();
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "{error}; detaching {} also failed: {detach}",
+                        path.display()
+                    ),
+                ));
+            }
+            return Err(error);
+        }
         return Ok(LoopDevice {
             path,
             _device: device,

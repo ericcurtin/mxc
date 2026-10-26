@@ -196,8 +196,9 @@ impl StatefulSandboxBackend for KataStateAwareRunner {
             _stdout: stdout,
             _stderr: stderr,
         };
-        let deadline = (request.script_timeout > 0)
-            .then(|| Instant::now() + Duration::from_millis(u64::from(request.script_timeout)));
+        let timeout_ms = request.script_timeout;
+        let deadline =
+            (timeout_ms > 0).then(|| Instant::now() + Duration::from_millis(u64::from(timeout_ms)));
 
         Ok(ExecHandle {
             stdout: handles.0,
@@ -209,6 +210,12 @@ impl StatefulSandboxBackend for KataStateAwareRunner {
                 execution.release();
                 match outcome.map_err(KataError::into_mxc_error)? {
                     ExitOutcome::Exited(code) => Ok(ExecOutcome::Exited(code)),
+                    // The relay cannot represent a timeout, so report it as an error.
+                    ExitOutcome::TimedOut if stdio == ExecStdio::Relayed => {
+                        Err(MxcError::backend_error(format!(
+                            "Kata exec timed out after {timeout_ms}ms"
+                        )))
+                    }
                     ExitOutcome::TimedOut => Ok(ExecOutcome::TimedOut),
                 }
             }),

@@ -257,20 +257,9 @@ impl Execution {
         }
 
         let (sender, exit) = mpsc::channel();
-        let waiter = task.clone();
-        let (wait_task_id, wait_exec_id) = (task_id.to_string(), exec_id.to_string());
-        std::thread::Builder::new()
-            .name("mxc-kata-wait".to_string())
-            .spawn(move || {
-                let status = waiter
-                    .wait(&wait_task_id, &wait_exec_id)
-                    .map(|code| code as i32)
-                    .map_err(|e| e.to_string());
-                let _ = sender.send(status);
-            })
-            .map_err(|e| KataError::failed(format!("cannot start the wait thread: {e}")))?;
-
-        Ok(Self {
+        // Built before the wait thread so a failed spawn drops it, which kills
+        // the process and releases its shim entry and FIFOs.
+        let execution = Self {
             task: task.clone(),
             task_id: task_id.to_string(),
             exec_id: exec_id.to_string(),
@@ -291,7 +280,22 @@ impl Execution {
             result: None,
             gone: false,
             released: false,
-        })
+        };
+
+        let waiter = task.clone();
+        let (wait_task_id, wait_exec_id) = (task_id.to_string(), exec_id.to_string());
+        std::thread::Builder::new()
+            .name("mxc-kata-wait".to_string())
+            .spawn(move || {
+                let status = waiter
+                    .wait(&wait_task_id, &wait_exec_id)
+                    .map(|code| code as i32)
+                    .map_err(|e| e.to_string());
+                let _ = sender.send(status);
+            })
+            .map_err(|e| KataError::failed(format!("cannot start the wait thread: {e}")))?;
+
+        Ok(execution)
     }
 
     pub(crate) fn take_stdin(&mut self) -> Option<StdinWriter> {
@@ -362,7 +366,12 @@ impl Execution {
                 Err(RecvTimeoutError::Timeout) => {
                     self.kill()?;
                     match self.exit.recv_timeout(KILL_REPORT_TIMEOUT) {
-                        Ok(_) => self.gone = true,
+                        Ok(Ok(_)) => self.gone = true,
+                        Ok(Err(message)) => {
+                            return Err(KataError::failed(format!(
+                                "could not confirm the process exited after SIGKILL: {message}"
+                            )))
+                        }
                         Err(_) => {
                             return Err(KataError::failed(format!(
                                 "the process did not exit within {}s of SIGKILL",
