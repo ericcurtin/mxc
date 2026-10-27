@@ -228,7 +228,9 @@ removed this way.
   waits on a pipe MXC holds open.
 - **Streams.** Each process gets three named pipes. MXC holds the ends it needs
   before the shim opens the others, and sends the shim `CloseIO` to deliver end
-  of file on stdin, because the shim keeps its own copy of that pipe open.
+  of file on stdin, because the shim keeps its own copy of that pipe open. A
+  pump thread feeds stdin, so a workload that never reads it cannot stall
+  teardown, and a lifecycle `exec` gets a pipe whose last close sends `CloseIO`.
 - **Network namespace.** MXC creates an empty network namespace for each sandbox
   and passes it to the shim, which attaches only the interfaces it finds in it.
   Owning it lets MXC remove it even if the shim dies.

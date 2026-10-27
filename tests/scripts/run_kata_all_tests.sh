@@ -206,6 +206,22 @@ token-bytes=0"
         fail "$h timeout (status $STATUS, ${elapsed}s): $(cat "$OUT") / $(cat "$ERR")"
     fi
     assert_clean "$h timeout" || true
+
+    # Input the workload never reads must not stall the run, even when it fills
+    # the stdin FIFO.
+    write_config "$WORK/stdin.json" "$h" 'echo done'
+    OUT="$WORK/stdin.out"
+    ERR="$WORK/stdin.err"
+    started="$(date +%s)"
+    head -c 4194304 /dev/zero | timeout 150 "$LXC_EXEC" --experimental "$WORK/stdin.json" >"$OUT" 2>"$ERR"
+    STATUS=${PIPESTATUS[1]}
+    elapsed=$(($(date +%s) - started))
+    if [ "$STATUS" -eq 0 ] && [ "$(cat "$OUT")" = "done" ]; then
+        pass "$h stdin: unread input did not stall the run (${elapsed}s)"
+    else
+        fail "$h stdin (status $STATUS, ${elapsed}s): $(cat "$OUT") / $(cat "$ERR")"
+    fi
+    assert_clean "$h stdin" || true
 }
 
 # Requests the backend must refuse before it creates a VM.

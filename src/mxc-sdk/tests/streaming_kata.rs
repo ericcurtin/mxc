@@ -770,6 +770,41 @@ fn exec_in(sandbox_id: &str, command: &str, timeout_ms: Option<u32>) -> (WaitRes
     (outcome, out)
 }
 
+/// Runs `command` with `input` on its standard input, handed over as native
+/// stdio, and returns how it ended and what it wrote.
+fn exec_with_native_input(sandbox_id: &str, command: &str, input: &str) -> (WaitResult, String) {
+    let request = json!({"version": "1.1.0-alpha", "phase": "exec",
+                         "sandboxId": sandbox_id, "process": {"commandLine": command}});
+    let mut handle = execute_lifecycle_json(&request.to_string(), true)
+        .unwrap_or_else(|e| panic!("exec was refused: {e:?}"));
+    let stdio = handle
+        .take_native_stdio()
+        .expect("native stdio is taken")
+        .expect("native stdio is available");
+    let mut stdin = std::fs::File::from(stdio.stdin.expect("stdin"));
+    let mut stdout = std::fs::File::from(stdio.stdout.expect("stdout"));
+    let reader = std::thread::spawn(move || {
+        // Native stdout is non-blocking, so a read may find nothing yet.
+        let (mut text, mut chunk) = (Vec::new(), [0u8; 4096]);
+        let deadline = Instant::now() + LIVE_TIMEOUT;
+        while Instant::now() < deadline {
+            match stdout.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => text.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(e) => panic!("reading the output: {e}"),
+            }
+        }
+        String::from_utf8_lossy(&text).into_owned()
+    });
+    stdin.write_all(input.as_bytes()).expect("input is written");
+    drop(stdin);
+    let outcome = handle.wait().expect("exec is waited for");
+    (outcome, reader.join().unwrap())
+}
+
 /// Releases a sandbox when a test fails part way, so one failure does not
 /// strand a VM and fail every test after it.
 struct ReleaseOnDrop(String);
@@ -836,6 +871,12 @@ fn kata_runs_the_container_lifecycle_and_keeps_the_writable_layer_across_a_resta
             "{hypervisor}"
         );
         assert_eq!(lines.next(), Some("lo"), "{hypervisor}");
+
+        // Input handed over as native stdio reaches the process, and ends only
+        // when the caller closes it.
+        let (outcome, out) = exec_with_native_input(&sandbox_id, "cat", "from-caller");
+        assert_eq!(outcome, WaitResult::Exited(0), "{hypervisor}: {out:?}");
+        assert_eq!(out, "from-caller", "{hypervisor}");
 
         // Processes in one sandbox share its state; a timeout ends only its own.
         let (outcome, _) = exec_in(&sandbox_id, "sleep 600", Some(2000));

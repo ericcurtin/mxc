@@ -259,6 +259,46 @@ impl Client {
     }
 }
 
+/// A fake shim for tests: answers every call with an empty OK reply and
+/// reports each called method name.
+#[cfg(test)]
+pub(crate) fn serve_methods(
+    listener: std::os::unix::net::UnixListener,
+) -> std::sync::mpsc::Receiver<String> {
+    let (sender, calls) = std::sync::mpsc::channel();
+    // Ends with the process: it waits in `accept` once the test is done.
+    std::thread::spawn(move || {
+        for connection in listener.incoming() {
+            let Ok(mut connection) = connection else {
+                break;
+            };
+            let mut raw = [0u8; HEADER_LEN];
+            if connection.read_exact(&mut raw).is_err() {
+                continue;
+            }
+            let header = Header::decode(&raw);
+            let mut body = vec![0u8; header.length as usize];
+            if connection.read_exact(&mut body).is_err() {
+                continue;
+            }
+            let method = Decoder::new(&body)
+                .filter_map(Result::ok)
+                .find(|field| field.number == 2)
+                .and_then(|field| field.string().ok())
+                .unwrap_or_default();
+            let _ = sender.send(method);
+            let reply = Header {
+                length: 0,
+                stream_id: header.stream_id,
+                message_type: MESSAGE_TYPE_RESPONSE,
+                flags: 0,
+            };
+            let _ = connection.write_all(&reply.encode());
+        }
+    });
+    calls
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

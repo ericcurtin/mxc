@@ -11,12 +11,12 @@
 //! finishes or is dropped.
 
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::kata_common::error::KataError;
-use crate::kata_common::execution::{Execution, ExitOutcome, KillScope, StdinWriter};
+use crate::kata_common::execution::{Execution, ExitOutcome, KillScope, StdinPump, StdinWriter};
 use crate::kata_common::host::{self, Install};
 use crate::kata_common::policy::{self, Plan};
 use crate::kata_common::sandbox::Ephemeral;
@@ -122,75 +122,6 @@ impl OutputPump {
             std::thread::sleep(Duration::from_millis(10));
         }
         self.canceller.close();
-        let _ = self.handle.join();
-    }
-}
-
-/// Forwards this process's standard input to the sandboxed process.
-struct StdinPump {
-    wake: OwnedFd,
-    handle: JoinHandle<()>,
-}
-
-impl StdinPump {
-    fn start(mut writer: StdinWriter) -> io::Result<Self> {
-        let mut fds = [0i32; 2];
-        // SAFETY: `fds` has room for the two descriptors `pipe2` writes.
-        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: both descriptors were just created and are owned here.
-        let (wake_read, wake) =
-            unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-        let handle = std::thread::Builder::new()
-            .name("mxc-kata-stdin".to_string())
-            .spawn(move || {
-                let mut buffer = [0u8; 8192];
-                loop {
-                    let mut polled = [
-                        libc::pollfd {
-                            fd: 0,
-                            events: libc::POLLIN,
-                            revents: 0,
-                        },
-                        libc::pollfd {
-                            fd: wake_read.as_raw_fd(),
-                            events: libc::POLLIN,
-                            revents: 0,
-                        },
-                    ];
-                    // Poll rather than read directly so the thread can be woken
-                    // when the process ends; this process's stdin is shared with
-                    // its parent and must not be made non-blocking.
-                    // SAFETY: `polled` is a valid array of two pollfd.
-                    let ready = unsafe { libc::poll(polled.as_mut_ptr(), 2, -1) };
-                    if ready < 0 {
-                        if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-                            continue;
-                        }
-                        break;
-                    }
-                    if polled[1].revents != 0 || polled[0].revents & libc::POLLNVAL != 0 {
-                        break;
-                    }
-                    if polled[0].revents == 0 {
-                        continue;
-                    }
-                    // SAFETY: the buffer is valid for its length.
-                    let read = unsafe { libc::read(0, buffer.as_mut_ptr().cast(), buffer.len()) };
-                    if read <= 0 || writer.write_all(&buffer[..read as usize]).is_err() {
-                        break;
-                    }
-                }
-                // Dropping the writer delivers end of file to the process.
-                drop(writer);
-            })?;
-        Ok(Self { wake, handle })
-    }
-
-    fn stop(self) {
-        // SAFETY: the buffer is one valid byte and the descriptor is owned.
-        unsafe { libc::write(self.wake.as_raw_fd(), [0u8].as_ptr().cast(), 1) };
         let _ = self.handle.join();
     }
 }
@@ -304,8 +235,9 @@ impl KataProcess {
                     }
                 }
                 if let Some(writer) = stdin {
-                    self.stdin_pump =
-                        Some(StdinPump::start(writer).map_err(|e| io_error("stdin", e))?);
+                    self.stdin_pump = Some(
+                        StdinPump::start(io::stdin(), writer).map_err(|e| io_error("stdin", e))?,
+                    );
                 }
             }
             StdioMode::Pty(_) => unreachable!("rejected before the sandbox is created"),
