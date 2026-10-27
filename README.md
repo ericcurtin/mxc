@@ -12,7 +12,7 @@ behind a unified containment model and typed SDKs.
 - **JSON-based configuration**: Versioned container-creation requests and
   security policies
 - **Multiple containment backends**: ProcessContainer, Windows Sandbox, LXC,
-  Bubblewrap, Seatbelt, MicroVM (Nanvix), Hyperlight, Kata Containers,
+  Bubblewrap, Seatbelt, MicroVM (NVX on Windows x64), Hyperlight, Kata Containers,
   IsolationSession, and WSLC
 - **Policy-driven sandboxing**:
   - **Filesystem policy**: Read-only, read-write, and denied path lists
@@ -53,10 +53,10 @@ Linux, and macOS.
 | Runtime platform | Default backend | Other backends | Minimum host OS |
 |---|---|---|---|
 | Windows 11 x64 / ARM64 | `processcontainer` | `windows_sandbox`\*, `wslc`, `microvm`\*, `hyperlight`\*, `isolation_session` | [Windows OS-version support](docs/backends/process-container/os-version-support.md)|
-| Linux x64 / ARM64 | `bubblewrap` | `lxc`, `microvm`, `hyperlight`, `kata`\* | - |
+| Linux x64 / ARM64 | `bubblewrap` | `lxc`, `hyperlight`, `kata`\* | - |
 | macOS ARM64 / x64 | `seatbelt` | - | - |
 
-\* These backends are **experimental**.
+\* These backends are **experimental**. MicroVM is currently available on Windows x64 only.
 
 ## How do I use MXC?
 

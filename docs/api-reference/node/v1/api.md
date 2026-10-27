@@ -13,6 +13,7 @@ Callers do not supply JSON or a schema version.
 |---|---|---|---|
 | Capture stdout and stderr | `run` | `runInContainer` | `Promise<ExecutionResult>` |
 | Live standard pipes | `spawn` | `spawnInContainer` | `Promise<MxcProcess>` |
+| Live standard pipes with a writable WSLC stdin | `spawnWithStdin` | `spawnInContainerWithStdin` | `Promise<MxcProcess>` |
 | Interactive terminal | `spawnWithPty` | `spawnInContainerWithPty` | `Promise<MxcPtyProcess>` |
 
 Creation takes `ContainerRequest` and operation options. Existing-container
@@ -52,6 +53,13 @@ export async function deprovisionContainer<C extends LifecycleContainmentKind>(c
 ## `@microsoft/mxc-sdk/v1::policy.filesystem.getAvailableToolsPolicy`
 
 Discover tool and SDK directories from the environment and return them as policy paths.
+
+On Windows, finding `pwsh.exe` on `PATH` also grants read-write access to the
+PSReadLine history directory under the supplied `USERPROFILE`. It does not
+implicitly grant read access to a drive root.
+
+For PowerShell startup failures, see
+[troubleshooting](https://github.com/microsoft/mxc/blob/main/docs/troubleshooting.md#powershell-startup).
 
 ```typescript
 export function getAvailableToolsPolicy(environment?: {
@@ -176,20 +184,40 @@ export async function runInContainer<C extends PipedExecuteBackend>(containerId:
 
 ## `@microsoft/mxc-sdk/v1::spawn`
 
-Create a container request and asynchronously return its live process.
+Create a container request and asynchronously return its live process. A WSLC
+command reads end-of-file on stdin.
 
 ```typescript
 export async function spawn(request: ContainerRequest, options: SpawnOptions = {}): Promise<MxcProcess>;
 ```
 
 
+## `@microsoft/mxc-sdk/v1::spawnWithStdin`
+
+`spawn` with a writable `standardInput` whose end gives the command end-of-file.
+
+```typescript
+export async function spawnWithStdin(request: ContainerRequest, options: SpawnOptions = {}): Promise<MxcProcess>;
+```
+
+
 ## `@microsoft/mxc-sdk/v1::spawnInContainer`
 
 Spawn a workload asynchronously inside a started IsolationSession or WSLC
-container with live standard pipes.
+container with live standard pipes. A WSLC workload reads end-of-file on stdin.
 
 ```typescript
 export async function spawnInContainer<C extends PipedExecuteBackend>(containerId: ContainerId<C>, request: ExecutionRequest<C>, options: SpawnInContainerOptions = {}): Promise<MxcProcess>;
+```
+
+
+## `@microsoft/mxc-sdk/v1::spawnInContainerWithStdin`
+
+`spawnInContainer` with a writable `standardInput`. Ending it gives the workload
+end-of-file.
+
+```typescript
+export async function spawnInContainerWithStdin<C extends PipedExecuteBackend>(containerId: ContainerId<C>, request: ExecutionRequest<C>, options: SpawnInContainerOptions = {}): Promise<MxcProcess>;
 ```
 
 

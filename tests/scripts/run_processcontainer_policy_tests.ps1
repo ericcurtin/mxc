@@ -242,6 +242,21 @@ if ($facts.baseContainerSupportsDenyPaths) {
 foreach ($code in @(0, 1, 42)) {
     Invoke-PolicyCase -Name "exit-code-$code" -Request (New-PolicyRequest -Mode 'exit' -ProbeArguments @("$code")) -ExpectedExitCode $code
 }
+$renamedCmd = Join-Path $ScratchRoot 'launcher\pwsh.exe'
+Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\cmd.exe') -Destination $renamedCmd
+$pwshExit = New-PolicyRequest -Mode 'exit'
+$pwshExit.process.commandLine = '"' + $renamedCmd + '" /d /c "echo NATIVE_PWSH_EXIT_OK & echo NATIVE_PWSH_ERROR 1>&2 & exit /b 7"'
+$pwshExit.filesystem.readonlyPaths += Split-Path $renamedCmd -Parent
+Invoke-PolicyCase -Name 'pwsh-nonzero-exit-keeps-workload-error' -Request $pwshExit `
+    -ExpectedExitCode 7 -ExpectedOutput 'NATIVE_PWSH_EXIT_OK' -ValidateResult {
+        param($Result)
+        if ($Result.Stderr -notmatch 'NATIVE_PWSH_ERROR' -or
+            "$($Result.Stderr)`n$($Result.Log)" -match 'missing_filesystem_access|root drive') {
+            throw 'PowerShell-named workload failure was replaced with filesystem advice.'
+        }
+        return $true
+    }
+
 function ConvertTo-ProbeArgument {
     param([hashtable]$Value)
     [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($Value | ConvertTo-Json -Depth 8 -Compress)))
@@ -286,10 +301,12 @@ Copy-Item -LiteralPath "$WindowsPowerShell.config" -Destination "$childImage.con
 $readyFile = Join-Path $ScratchRoot 'rw\grandchild-ready'
 $timeoutSpec = @{ powershell = $childImage; ready = $readyFile }
 $timeoutRequest = New-PolicyRequest -Mode 'timeout-parent' -ProbeArguments @((ConvertTo-ProbeArgument $timeoutSpec))
-$timeoutRequest.process.timeout = 6000
+# Two Windows PowerShell cold starts take over 5 seconds on some arm64 hosts.
+# The grandchild must be ready before the timeout fires.
+$timeoutRequest.process.timeout = 20000
 $observeTree = {
     param($Process)
-    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
     while (-not (Test-Path -LiteralPath $readyFile)) {
         if ($Process.HasExited -or [DateTime]::UtcNow -ge $deadline) { throw 'Grandchild did not demonstrate readiness before timeout.' }
         Start-Sleep -Milliseconds 20

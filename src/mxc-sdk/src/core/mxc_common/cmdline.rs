@@ -43,10 +43,10 @@ impl CommandLineContext {
             | ContainmentBackend::Lxc
             | ContainmentBackend::Seatbelt
             | ContainmentBackend::Bubblewrap
+            | ContainmentBackend::MicroVm
             | ContainmentBackend::Kata => Self::PosixShell,
             ContainmentBackend::ProcessContainer
             | ContainmentBackend::Vm
-            | ContainmentBackend::MicroVm
             | ContainmentBackend::Hyperlight => Self::WindowsCreateProcess,
         }
     }
@@ -379,6 +379,14 @@ mod tests {
             cmdline_from_argv_for_context(&s(&["echo", "can't"]), CommandLineContext::PosixShell)
                 .unwrap(),
             "echo 'can'\\''t'"
+        );
+    }
+
+    #[test]
+    fn microvm_uses_posix_shell_quoting() {
+        assert_eq!(
+            CommandLineContext::for_backend(&ContainmentBackend::MicroVm),
+            CommandLineContext::PosixShell
         );
     }
 
