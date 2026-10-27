@@ -434,6 +434,33 @@ fn kata_streams_stdio_runs_in_the_guest_kernel_and_has_no_network() {
 }
 
 #[test]
+fn kata_input_a_workload_never_reads_cannot_outlive_it() {
+    for hypervisor in hypervisors() {
+        let _guard = exclusive();
+        let Some(live) = live(&hypervisor) else {
+            continue;
+        };
+        println!("== {hypervisor}: unread input");
+
+        let request = one_shot(&live, "sleep 3; exit 3", json!({}));
+        let mut process = spawn_container_json(&request, true).expect("the sandbox starts");
+        let mut stdin = process.take_stdin().expect("stdin is available");
+        let (done, written) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(stdin.write_all(&vec![0u8; 32 << 20]));
+        });
+        let outcome = process.wait().expect("the wait is answered");
+        assert_eq!(outcome, WaitResult::Exited(3), "{hypervisor}");
+        let result = written
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap_or_else(|_| panic!("{hypervisor}: the write outlived the process"));
+        assert!(result.is_err(), "{hypervisor}: unread input was accepted");
+        drop(process);
+        assert_nothing_left(&live);
+    }
+}
+
+#[test]
 fn kata_accepts_an_explicit_deny_all_network_policy() {
     for hypervisor in hypervisors() {
         let _guard = exclusive();

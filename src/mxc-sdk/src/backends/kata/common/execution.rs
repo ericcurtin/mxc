@@ -61,23 +61,9 @@ impl std::fmt::Debug for StdinWriter {
     }
 }
 
-impl StdinWriter {
-    fn raw_fd(&self) -> Option<RawFd> {
-        self.file.as_ref().map(AsRawFd::as_raw_fd)
-    }
-
-    /// Makes writes fail with `WouldBlock` rather than wait for room. MXC holds
-    /// the FIFO's read end too, so a full FIFO is never released by the guest
-    /// exiting.
-    fn set_nonblocking(&self) -> io::Result<()> {
-        let fd = self.raw_fd().ok_or(io::ErrorKind::BrokenPipe)?;
-        // SAFETY: `fd` is open for as long as `self` is borrowed.
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        // SAFETY: as above; F_SETFL takes an integer flag set.
-        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+impl AsRawFd for StdinWriter {
+    fn as_raw_fd(&self) -> RawFd {
+        self.file.as_ref().map_or(-1, AsRawFd::as_raw_fd)
     }
 }
 
@@ -137,30 +123,34 @@ fn poll_or_wake(fd: RawFd, events: i16, wake: RawFd) -> io::Result<(i16, i16)> {
 }
 
 /// Writes all of `data`, giving up when `wake` has data or the write fails.
-fn write_until_woken(writer: &mut StdinWriter, wake: RawFd, mut data: &[u8]) -> bool {
-    let Some(fd) = writer.raw_fd() else {
-        return false;
-    };
+///
+/// Waits for room before each write and writes at most `PIPE_BUF` bytes, which
+/// then cannot block. So `sink` can be left blocking, as a stream shared with
+/// this process's parent must be, and a full pipe nobody reads cannot trap the
+/// thread.
+fn write_until_woken(sink: &mut (impl Write + AsRawFd), wake: RawFd, mut data: &[u8]) -> bool {
     while !data.is_empty() {
-        match writer.write(data) {
+        match poll_or_wake(sink.as_raw_fd(), libc::POLLOUT, wake) {
+            Ok((_, 0)) => {}
+            _ => return false,
+        }
+        match sink.write(&data[..data.len().min(libc::PIPE_BUF)]) {
             Ok(0) => return false,
             Ok(written) => data = &data[written..],
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                match poll_or_wake(fd, libc::POLLOUT, wake) {
-                    Ok((_, 0)) => {}
-                    _ => return false,
-                }
-            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                ) => {}
             Err(_) => return false,
         }
     }
     true
 }
 
-/// Moves bytes from `source` to `writer` until `source` ends, a write fails, or
+/// Moves bytes from `source` to `sink` until `source` ends, a write fails, or
 /// `wake` has data.
-fn forward_input(source: RawFd, wake: RawFd, writer: &mut StdinWriter) {
+fn forward(source: RawFd, wake: RawFd, sink: &mut (impl Write + AsRawFd)) {
     let mut buffer = [0u8; 8192];
     // Poll rather than read directly so the thread can be woken when the
     // process ends; this process's stdin is shared with its parent and must not
@@ -177,40 +167,38 @@ fn forward_input(source: RawFd, wake: RawFd, writer: &mut StdinWriter) {
                 _ => return,
             }
         }
-        if read == 0 || !write_until_woken(writer, wake, &buffer[..read as usize]) {
+        if read == 0 || !write_until_woken(sink, wake, &buffer[..read as usize]) {
             return;
         }
     }
 }
 
-/// Copies `source` into a process's standard input until `source` ends, a
-/// write fails, or the pump is stopped. The input then ends, because the pump
-/// drops the writer.
-pub(crate) struct StdinPump {
+/// Copies `source` to `sink` until `source` ends, a write fails, or the pump is
+/// stopped, then drops `sink`. Dropping a [`StdinWriter`] ends the process's
+/// input.
+pub(crate) struct Pump {
     wake: PipeWriter,
     // Kept so the wake write cannot hit a closed pipe after the thread ends.
     _wake_read: PipeReader,
     handle: Option<JoinHandle<()>>,
 }
 
-impl StdinPump {
-    pub(crate) fn start(
+impl Pump {
+    pub(crate) fn start<W: Write + AsRawFd + Send + 'static>(
         source: impl AsFd + Send + 'static,
-        mut writer: StdinWriter,
+        mut sink: W,
     ) -> io::Result<Self> {
-        writer.set_nonblocking()?;
         let (wake_read, wake) = io::pipe()?;
         let thread_wake = wake_read.try_clone()?;
         let handle = std::thread::Builder::new()
-            .name("mxc-kata-stdin".to_string())
+            .name("mxc-kata-pump".to_string())
             .spawn(move || {
-                forward_input(
+                forward(
                     source.as_fd().as_raw_fd(),
                     thread_wake.as_raw_fd(),
-                    &mut writer,
+                    &mut sink,
                 );
-                // Dropping the writer delivers end of file to the process.
-                drop(writer);
+                drop(sink);
             })?;
         Ok(Self {
             wake,
@@ -219,9 +207,25 @@ impl StdinPump {
         })
     }
 
+    /// Feeds `writer` from a new pipe and returns the pipe's write end. The
+    /// process's input ends when the caller closes it.
+    pub(crate) fn pipe(writer: StdinWriter) -> io::Result<(PipeWriter, Self)> {
+        let (reader, write_end) = io::pipe()?;
+        Ok((write_end, Self::start(reader, writer)?))
+    }
+
     /// Ends the pump and waits for it. Never waits on the process.
     pub(crate) fn stop(mut self) {
         self.shut_down();
+    }
+
+    /// Gives the pump up to `grace` to end by itself, then stops it.
+    pub(crate) fn finish(self, grace: Duration) {
+        let deadline = Instant::now() + grace;
+        while self.handle.as_ref().is_some_and(|h| !h.is_finished()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.stop();
     }
 
     fn shut_down(&mut self) {
@@ -232,7 +236,7 @@ impl StdinPump {
     }
 }
 
-impl Drop for StdinPump {
+impl Drop for Pump {
     fn drop(&mut self) {
         self.shut_down();
     }
@@ -630,24 +634,29 @@ pub(crate) mod testing {
 
         /// Bytes waiting in the FIFO.
         pub(crate) fn queued(&self) -> usize {
-            let mut queued: libc::c_int = 0;
-            // SAFETY: FIONREAD writes one int through the pointer.
-            unsafe { libc::ioctl(self.guest.as_raw_fd(), libc::FIONREAD, &mut queued) };
-            queued as usize
+            queued(&self.guest)
         }
+    }
+
+    /// Bytes waiting to be read from a pipe.
+    pub(crate) fn queued(pipe: &impl AsRawFd) -> usize {
+        let mut queued: libc::c_int = 0;
+        // SAFETY: FIONREAD writes one int through the pointer.
+        unsafe { libc::ioctl(pipe.as_raw_fd(), libc::FIONREAD, &mut queued) };
+        queued as usize
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::testing::stdin_fixture;
+    use super::testing::{queued, stdin_fixture};
     use super::*;
 
     #[test]
     fn a_pump_forwards_input_and_ends_it_when_its_source_closes() {
         let mut fixture = stdin_fixture();
         let (source, mut feed) = io::pipe().unwrap();
-        let pump = StdinPump::start(source, fixture.take_writer()).unwrap();
+        let pump = Pump::start(source, fixture.take_writer()).unwrap();
 
         feed.write_all(b"hello").unwrap();
         assert_eq!(fixture.read_exactly(5), b"hello");
@@ -667,21 +676,21 @@ mod tests {
         pump.stop();
     }
 
-    /// The guest never reads, and MXC holds the FIFO's read end too, so a write
-    /// that waits for room is never released by the process exiting.
-    #[test]
-    fn a_pump_stuck_on_a_full_fifo_stops_when_asked() {
-        let mut fixture = stdin_fixture();
-        let (source, mut feed) = io::pipe().unwrap();
-        let pump = StdinPump::start(source, fixture.take_writer()).unwrap();
+    /// Feeds a pump whose sink is full and unread, and checks that stopping it
+    /// does not wait on the sink and that the feeder's writes then fail.
+    fn assert_stops_with_a_full_sink(
+        pump: Pump,
+        mut feed: PipeWriter,
+        sink_queued: impl Fn() -> usize,
+    ) {
         let feeder = std::thread::spawn(move || feed.write_all(&vec![0u8; 4 << 20]));
 
-        // Wait for the FIFO to fill, then give the pump time to try one more write.
+        // Wait for the sink to fill, then give the pump time to try one more write.
         let deadline = Instant::now() + Duration::from_secs(10);
-        while fixture.queued() < 64 * 1024 && Instant::now() < deadline {
+        while sink_queued() < 64 * 1024 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(fixture.queued() >= 64 * 1024, "the FIFO never filled");
+        assert!(sink_queued() >= 64 * 1024, "the sink never filled");
         std::thread::sleep(Duration::from_millis(300));
 
         let (stopped, done) = mpsc::channel();
@@ -693,7 +702,30 @@ mod tests {
             done.recv_timeout(Duration::from_secs(10)).is_ok(),
             "stop waited on a write that cannot finish"
         );
-        // The caller's writes end rather than wait for a pump that is gone.
+        // The feeder's writes end rather than wait for a pump that is gone.
         assert!(feeder.join().unwrap().is_err());
+    }
+
+    /// The guest never reads, and MXC holds the FIFO's read end too, so a write
+    /// that waits for room is never released by the process exiting.
+    #[test]
+    fn a_pump_stuck_on_a_full_fifo_stops_when_asked() {
+        let mut fixture = stdin_fixture();
+        let (source, feed) = io::pipe().unwrap();
+        let pump = Pump::start(source, fixture.take_writer()).unwrap();
+        assert_stops_with_a_full_sink(pump, feed, || fixture.queued());
+    }
+
+    /// The consumer of this process's own output stops reading. The stream is
+    /// shared with the caller, so it must stay blocking.
+    #[test]
+    fn a_pump_stuck_on_a_full_output_pipe_stops_when_asked_and_leaves_it_blocking() {
+        let (source, feed) = io::pipe().unwrap();
+        let (consumer, sink) = io::pipe().unwrap();
+        let pump = Pump::start(source, sink.try_clone().unwrap()).unwrap();
+        assert_stops_with_a_full_sink(pump, feed, || queued(&consumer));
+        // SAFETY: `sink` is open; F_GETFL only reads its flags.
+        let flags = unsafe { libc::fcntl(sink.as_raw_fd(), libc::F_GETFL) };
+        assert_eq!(flags & libc::O_NONBLOCK, 0, "the shared stream was changed");
     }
 }

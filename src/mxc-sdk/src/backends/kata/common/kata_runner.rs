@@ -10,13 +10,13 @@
 //! streams. Either way the sandbox is stopped and released when the handle
 //! finishes or is dropped.
 
-use std::io::{self, Read, Write};
+use std::fs::File;
+use std::io::{self, PipeWriter, Read, Write};
 use std::os::fd::OwnedFd;
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::kata_common::error::KataError;
-use crate::kata_common::execution::{Execution, ExitOutcome, KillScope, StdinPump, StdinWriter};
+use crate::kata_common::execution::{Execution, ExitOutcome, KillScope, Pump, StdinWriter};
 use crate::kata_common::host::{self, Install};
 use crate::kata_common::policy::{self, Plan};
 use crate::kata_common::sandbox::Ephemeral;
@@ -95,55 +95,25 @@ impl SandboxBackend for KataBackend {
     }
 }
 
-/// Copies the output of a FIFO to one of this process's own streams.
-struct OutputPump {
-    handle: JoinHandle<()>,
-    canceller: ReadCanceller,
-}
-
-impl OutputPump {
-    fn start(source: OwnedFd, target: OwnedFd) -> io::Result<Self> {
-        let mut reader = InterruptibleReader::new(source)?;
-        let canceller = reader.canceller();
-        let mut sink = std::fs::File::from(target);
-        let handle = std::thread::Builder::new()
-            .name("mxc-kata-output".to_string())
-            .spawn(move || {
-                let _ = io::copy(&mut reader, &mut sink);
-                let _ = sink.flush();
-            })?;
-        Ok(Self { handle, canceller })
-    }
-
-    /// Waits for the stream to end, then abandons it after the grace period.
-    fn finish(self, grace: Duration) {
-        let deadline = Instant::now() + grace;
-        while !self.handle.is_finished() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        self.canceller.close();
-        let _ = self.handle.join();
-    }
-}
-
-fn duplicate_standard_stream(fd: i32) -> io::Result<OwnedFd> {
+fn duplicate_standard_stream(fd: i32) -> io::Result<File> {
     // SAFETY: the standard descriptors are valid for the borrow's duration.
     let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
-    borrowed.try_clone_to_owned()
+    borrowed.try_clone_to_owned().map(File::from)
 }
 
 /// The sandboxed process of one create-and-run request.
 pub struct KataProcess {
     exec: Execution,
-    stdin: Option<StdinWriter>,
+    stdin: Option<PipeWriter>,
     stdout: Option<InterruptibleReader>,
     stderr: Option<InterruptibleReader>,
     stdout_canceller: Option<ReadCanceller>,
     stderr_canceller: Option<ReadCanceller>,
     /// Present in `Inherit` mode, where the process's output goes to this
     /// process's own streams.
-    output_pumps: Vec<OutputPump>,
-    stdin_pump: Option<StdinPump>,
+    output_pumps: Vec<Pump>,
+    /// Feeds the process's input: from the caller's pipe, or this process's stdin.
+    stdin_pump: Option<Pump>,
     deadline: Option<Instant>,
     timed_out: bool,
     exit: Option<i32>,
@@ -201,7 +171,12 @@ impl KataProcess {
         };
         match stdio {
             StdioMode::Pipes => {
-                self.stdin = stdin;
+                // A pipe, so a write cannot outlive the process.
+                if let Some(writer) = stdin {
+                    let (write_end, pump) = Pump::pipe(writer).map_err(|e| io_error("stdin", e))?;
+                    self.stdin = Some(write_end);
+                    self.stdin_pump = Some(pump);
+                }
                 for (slot, canceller, source, name) in [
                     (
                         &mut self.stdout,
@@ -229,15 +204,13 @@ impl KataProcess {
                     if let Some(source) = source {
                         let target =
                             duplicate_standard_stream(standard).map_err(|e| io_error(name, e))?;
-                        self.output_pumps.push(
-                            OutputPump::start(source, target).map_err(|e| io_error(name, e))?,
-                        );
+                        self.output_pumps
+                            .push(Pump::start(source, target).map_err(|e| io_error(name, e))?);
                     }
                 }
                 if let Some(writer) = stdin {
-                    self.stdin_pump = Some(
-                        StdinPump::start(io::stdin(), writer).map_err(|e| io_error("stdin", e))?,
-                    );
+                    self.stdin_pump =
+                        Some(Pump::start(io::stdin(), writer).map_err(|e| io_error("stdin", e))?);
                 }
             }
             StdioMode::Pty(_) => unreachable!("rejected before the sandbox is created"),

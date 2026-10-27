@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::kata_common::error::KataError;
-use crate::kata_common::execution::{ExitOutcome, KillScope, StdinPump, StdinWriter};
+use crate::kata_common::execution::{ExitOutcome, KillScope, Pump, StdinWriter};
 use crate::kata_common::host;
 use crate::kata_common::policy;
 use crate::kata_common::sandbox::{is_valid_token, Sandbox};
@@ -85,15 +85,15 @@ struct Streams {
 /// FIFO alone cannot say so, because Kata needs an explicit CloseIO.
 struct StdinRelay {
     write_end: Arc<Mutex<Option<PipeWriter>>>,
-    pump: StdinPump,
+    pump: Pump,
 }
 
 impl StdinRelay {
     fn start(writer: StdinWriter) -> io::Result<Self> {
-        let (reader, write_end) = io::pipe()?;
+        let (write_end, pump) = Pump::pipe(writer)?;
         Ok(Self {
             write_end: Arc::new(Mutex::new(Some(write_end))),
-            pump: StdinPump::start(reader, writer)?,
+            pump,
         })
     }
 
