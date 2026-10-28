@@ -260,6 +260,11 @@ removed this way.
 - Host directories cannot be shared with Firecracker.
 - No pseudo-terminal, resource limits, or image pulling. The root filesystem is
   supplied by the caller.
+- Killing a lifecycle exec, or its timeout, ends only that process. Processes
+  it started keep running in the guest.
+- `deniedPaths` are resolved through symlinks on the host, not in the guest, so
+  a guest root filesystem whose links differ from the host's can be masked at
+  the wrong path.
 - A hardware-virtualization failure inside the shim is reported by the shim's
   own message.
 
