@@ -80,7 +80,8 @@ assert_clean() {
     if grep -q "$WORK\|/mxc-kata-" /proc/self/mountinfo; then
         problems="$problems mounts"
     fi
-    if ps -eo stat=,cmd= | awk '$1 !~ /^Z/' | grep -q '[m]xc-kata-'; then
+    # No -q: SIGPIPE plus pipefail hides a match.
+    if ps -eo stat=,cmd= | awk '$1 !~ /^Z/' | grep '[m]xc-kata-' >/dev/null; then
         problems="$problems processes"
     fi
     local backing

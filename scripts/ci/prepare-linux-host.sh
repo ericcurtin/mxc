@@ -279,6 +279,8 @@ assert_workload_interpreters() {
 KATA_VERSION="4.3.1"
 KATA_SHA256="1463a2b86845f4d3d8e87f2f764ec59856fc0fee3520967a79ade32762be2e97"
 KATA_ROOT="/opt/kata"
+KATA_SHIM="$KATA_ROOT/runtime-rs/bin/containerd-shim-kata-v2"
+KATA_MARKER="$KATA_ROOT/.mxc-kata-release"
 KATA_ASSETS="/var/lib/mxc-kata-test"
 ALPINE_VERSION="3.22.2"
 ALPINE_SHA256="412454ed98025ad9cd910d13f3d448b184e81502baa83180e89f98d0f13674be"
@@ -308,13 +310,17 @@ install_kata() {
 
     local work
     work="$(mktemp -d)"
-    if [[ ! -x "$KATA_ROOT/runtime-rs/bin/containerd-shim-kata-v2" ]]; then
+    # Reuse a cached install only if it is the pinned release.
+    local release="${KATA_VERSION} ${KATA_SHA256}"
+    if [[ ! -x "$KATA_SHIM" || "$(cat "$KATA_MARKER" 2>/dev/null)" != "$release" ]]; then
         curl -fsSL --retry 3 -o "$work/kata.tar.zst" \
             "https://github.com/kata-containers/kata-containers/releases/download/${KATA_VERSION}/kata-static-${KATA_VERSION}-amd64.tar.zst"
         echo "${KATA_SHA256}  $work/kata.tar.zst" | sha256sum -c -
+        sudo rm -rf "$KATA_ROOT"
         sudo tar --zstd -xf "$work/kata.tar.zst" -C /
+        echo "$release" | sudo tee "$KATA_MARKER" >/dev/null
     fi
-    "$KATA_ROOT/runtime-rs/bin/containerd-shim-kata-v2" --version
+    "$KATA_SHIM" --version
 
     sudo mkdir -p "$KATA_ASSETS"
     if [[ ! -d "$KATA_ASSETS/rootfs" ]]; then
@@ -376,7 +382,7 @@ case "$backend" in
         ;;
     kata)
         install_kata
-        test -x "$KATA_ROOT/runtime-rs/bin/containerd-shim-kata-v2"
+        test -x "$KATA_SHIM"
         test -f "$KATA_ASSETS/rootfs.ext4"
         test -f "$KATA_ASSETS/configuration-rs-fc.toml"
         sudo -n true
