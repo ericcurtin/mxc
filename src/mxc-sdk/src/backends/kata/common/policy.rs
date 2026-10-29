@@ -384,9 +384,9 @@ pub(crate) fn plan(
             &normalized
         }
         Ok(None) => &request.policy,
-        Err(message) => return Err(KataError::rejected(message)),
+        Err(error) => return Err(error.into()),
     };
-    crate::mxc_common::filesystem_access::check_delegation(policy).map_err(KataError::rejected)?;
+    crate::mxc_common::filesystem_access::check_delegation(policy)?;
     let filesystem = map_filesystem(policy, hypervisor)?;
 
     Ok(Plan {

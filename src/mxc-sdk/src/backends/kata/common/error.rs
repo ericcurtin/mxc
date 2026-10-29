@@ -7,6 +7,7 @@
 
 use std::fmt;
 
+use crate::mxc_common::filesystem_object::FilesystemPolicyError;
 use crate::mxc_common::models::{FailurePhase, ScriptResponse};
 use crate::mxc_common::mxc_error::MxcError;
 
@@ -62,6 +63,15 @@ impl fmt::Display for KataError {
 }
 
 impl std::error::Error for KataError {}
+
+impl From<FilesystemPolicyError> for KataError {
+    fn from(error: FilesystemPolicyError) -> Self {
+        match error {
+            FilesystemPolicyError::Policy(message) => Self::Rejected(message),
+            FilesystemPolicyError::Host(message) => Self::Failed(message),
+        }
+    }
+}
 
 impl KataError {
     /// The result of a create-and-run request that failed with this error.
@@ -138,5 +148,17 @@ mod tests {
             assert_eq!(mxc.code, code);
             assert_eq!(mxc.message, message);
         }
+    }
+
+    #[test]
+    fn filesystem_policy_errors_map_to_rejected_and_failed() {
+        assert_eq!(
+            KataError::from(FilesystemPolicyError::Policy("bad".into())),
+            KataError::rejected("bad")
+        );
+        assert_eq!(
+            KataError::from(FilesystemPolicyError::Host("io".into())),
+            KataError::failed("io")
+        );
     }
 }
