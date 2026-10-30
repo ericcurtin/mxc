@@ -75,6 +75,17 @@ pub(crate) struct Install {
     pub(crate) config: PathBuf,
 }
 
+impl Install {
+    /// The same install with relative paths resolved against `cwd`. The shim
+    /// runs in the bundle directory, where a relative path no longer resolves.
+    fn relative_to(self, cwd: &Path) -> Install {
+        Install {
+            shim: cwd.join(self.shim),
+            config: cwd.join(self.config),
+        }
+    }
+}
+
 /// Finds the shim and the configuration file for `hypervisor`.
 ///
 /// `is_file` and `path_dirs` are parameters so the search is testable without
@@ -163,12 +174,15 @@ pub(crate) fn locate_installed(hypervisor: KataHypervisor) -> Result<Install, St
     let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect())
         .unwrap_or_default();
-    locate_install(
+    let install = locate_install(
         hypervisor,
         &process_env,
         &|path: &Path| path.is_file(),
         &path_dirs,
-    )
+    )?;
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("cannot determine the current directory: {e}"))?;
+    Ok(install.relative_to(&cwd))
 }
 
 /// The directory that holds sandbox state.
@@ -251,6 +265,34 @@ mod tests {
                 "/kata/share/defaults/kata-containers/runtime-rs/configuration-clh-runtime-rs.toml"
             )
         );
+    }
+
+    #[test]
+    fn relative_install_paths_are_resolved_against_the_caller_directory() {
+        let install = locate_install(
+            KataHypervisor::Qemu,
+            &env_of(&[(ENV_ROOT, "kata")]),
+            &files(&[
+                "kata/runtime-rs/bin/containerd-shim-kata-v2",
+                "kata/share/defaults/kata-containers/runtime-rs/configuration-qemu-runtime-rs.toml",
+            ]),
+            &[],
+        )
+        .unwrap()
+        .relative_to(Path::new("/work"));
+        assert_eq!(
+            install.shim,
+            Path::new("/work/kata/runtime-rs/bin/containerd-shim-kata-v2")
+        );
+        assert!(install.config.starts_with("/work/kata/"));
+
+        let absolute = Install {
+            shim: PathBuf::from("/opt/shim"),
+            config: PathBuf::from("/etc/kata.toml"),
+        }
+        .relative_to(Path::new("/work"));
+        assert_eq!(absolute.shim, Path::new("/opt/shim"));
+        assert_eq!(absolute.config, Path::new("/etc/kata.toml"));
     }
 
     #[test]

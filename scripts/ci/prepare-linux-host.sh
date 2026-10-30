@@ -323,14 +323,18 @@ install_kata() {
     "$KATA_SHIM" --version
 
     sudo mkdir -p "$KATA_ASSETS"
-    if [[ ! -d "$KATA_ASSETS/rootfs" ]]; then
+    # The marker is written last, so an interrupted build is redone from scratch.
+    local rootfs_marker="$KATA_ASSETS/.rootfs-release"
+    local rootfs_release="${ALPINE_VERSION} ${ALPINE_SHA256}"
+    if [[ "$(cat "$rootfs_marker" 2>/dev/null)" != "$rootfs_release" ]]; then
         curl -fsSL --retry 3 -o "$work/alpine.tar.gz" \
             "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION%.*}/releases/x86_64/alpine-minirootfs-${ALPINE_VERSION}-x86_64.tar.gz"
         echo "${ALPINE_SHA256}  $work/alpine.tar.gz" | sha256sum -c -
+        sudo rm -rf "$KATA_ASSETS/rootfs" "$KATA_ASSETS/rootfs.ext4" "$rootfs_marker"
         sudo mkdir "$KATA_ASSETS/rootfs"
         sudo tar -xzf "$work/alpine.tar.gz" -C "$KATA_ASSETS/rootfs"
-        sudo rm -f "$KATA_ASSETS/rootfs.ext4"
         sudo mke2fs -q -t ext4 -d "$KATA_ASSETS/rootfs" "$KATA_ASSETS/rootfs.ext4" 128M
+        echo "$rootfs_release" | sudo tee "$rootfs_marker" >/dev/null
     fi
 
     # The Firecracker configuration shipped with Kata 4.3.1 fails validation:
